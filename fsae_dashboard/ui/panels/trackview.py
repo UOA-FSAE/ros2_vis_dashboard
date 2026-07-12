@@ -11,7 +11,13 @@ import math
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QVBoxLayout
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+)
 
 from fsae_dashboard.ui.panels.base import Panel, register_panel
 
@@ -47,9 +53,20 @@ def _points_from(node) -> np.ndarray:
     return np.array(out) if out else np.empty((0, 2))
 
 
-def _yaw_from_quat(q: dict) -> float:
+def _car_yaw(q: dict) -> float:
+    """Heading in radians, tolerant of this stack's non-standard convention.
+
+    Several UOA-FSAE nodes stuff the yaw angle straight into ``orientation.w``
+    rather than a real quaternion (see stanley_controller.py: ``car_yaw =
+    car_pose.orientation.w``). A genuine unit quaternion has x²+y²+z²+w²==1; if
+    it doesn't, we treat ``w`` as the yaw angle directly.
+    """
+    x, y = q.get("x", 0.0), q.get("y", 0.0)
     z, w = q.get("z", 0.0), q.get("w", 1.0)
-    return 2.0 * math.atan2(z, w)
+    norm = x * x + y * y + z * z + w * w
+    if abs(norm - 1.0) > 1e-3:
+        return w  # yaw stored directly in w
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 @register_panel
@@ -60,6 +77,7 @@ class TrackViewPanel(Panel):
     def build_ui(self) -> None:
         self._topics = dict(_DEFAULTS)
         self._trail: list[tuple[float, float]] = []
+        self._yaw_offset = 0.0  # radians, added to car heading for detections
 
         root = QVBoxLayout(self)
         root.setContentsMargins(2, 2, 2, 2)
@@ -68,6 +86,14 @@ class TrackViewPanel(Panel):
         self.follow_cb = QCheckBox("Follow car")
         toolbar.addWidget(self.follow_cb)
         toolbar.addStretch(1)
+        toolbar.addWidget(QLabel("Heading offset °"))
+        self.yaw_spin = QDoubleSpinBox()
+        self.yaw_spin.setRange(-180.0, 180.0)
+        self.yaw_spin.setSingleStep(5.0)
+        self.yaw_spin.valueChanged.connect(
+            lambda deg: setattr(self, "_yaw_offset", math.radians(deg))
+        )
+        toolbar.addWidget(self.yaw_spin)
         root.addLayout(toolbar)
 
         self.plot = pg.PlotWidget()
@@ -89,11 +115,16 @@ class TrackViewPanel(Panel):
             self.plot.addItem(item)
 
     def get_config(self) -> dict:
-        return {"topics": self._topics, "follow": self.follow_cb.isChecked()}
+        return {
+            "topics": self._topics,
+            "follow": self.follow_cb.isChecked(),
+            "yaw_offset_deg": self.yaw_spin.value(),
+        }
 
     def apply_config(self, config: dict) -> None:
         self._topics.update(config.get("topics", {}))
         self.follow_cb.setChecked(bool(config.get("follow", False)))
+        self.yaw_spin.setValue(float(config.get("yaw_offset_deg", 0.0)))
         for key, topic in self._topics.items():
             if topic:
                 self.subscribe(topic, _TYPES.get(key, ""))
@@ -126,7 +157,8 @@ class TrackViewPanel(Panel):
 
         det = hub.latest(self._topics["detections_topic"])
         if det:
-            yaw = _yaw_from_quat(car["orientation"]) if (car and "orientation" in car) else 0.0
+            yaw = _car_yaw(car["orientation"]) if (car and "orientation" in car) else 0.0
+            yaw += self._yaw_offset
             ox, oy = car_xy if car_xy else (0.0, 0.0)
             self._draw_detections(det, ox, oy, yaw)
 

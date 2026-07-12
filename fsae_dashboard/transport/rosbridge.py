@@ -22,6 +22,20 @@ except ImportError:  # pragma: no cover - optional dependency
     roslibpy = None
 
 
+def _normalise_type(msg_type: str) -> str:
+    """Convert a 2-part ROS 1 style type to the 3-part ROS 2 form rosbridge wants.
+
+    ``ackermann_msgs/AckermannDriveStamped`` -> ``ackermann_msgs/msg/AckermannDriveStamped``.
+    Already-3-part types (``.../msg/...``, ``.../srv/...``) pass through unchanged.
+    """
+    if not msg_type or "/" not in msg_type:
+        return msg_type
+    parts = msg_type.split("/")
+    if len(parts) == 2:
+        return f"{parts[0]}/msg/{parts[1]}"
+    return msg_type
+
+
 class RosbridgeTransport(Transport):
     kind = "rosbridge"
 
@@ -60,7 +74,11 @@ class RosbridgeTransport(Transport):
             self._topics.clear()
         if self._client is not None:
             try:
-                self._client.terminate()
+                # close() disconnects the websocket but leaves the Twisted
+                # reactor running. terminate() would stop the reactor, and
+                # Twisted's global reactor can never be restarted in the same
+                # process -> ReactorNotRestartable on the next connect.
+                self._client.close()
             except Exception:  # noqa: BLE001
                 pass
         self._client = None
@@ -95,8 +113,14 @@ class RosbridgeTransport(Transport):
     ) -> SubscriptionHandle:
         if self._client is None:
             raise RuntimeError("Transport not started")
-        # cbor is a good default; images benefit from cbor-raw.
-        comp = compression or ("cbor-raw" if "Image" in msg_type else "cbor")
+        # rosbridge (ROS 2) needs the 3-part "pkg/msg/Type" form. Accept the
+        # 2-part "pkg/Type" form from older configs and normalise it, else the
+        # server fails to register the subscription and delivers nothing.
+        msg_type = _normalise_type(msg_type)
+        # Plain JSON by default: it decodes to dicts reliably. cbor-raw must NOT
+        # be used here — it delivers opaque serialised bytes we can't unpack
+        # into fields without the .msg definitions.
+        comp = compression or "none"
         ros_topic = roslibpy.Topic(
             self._client,
             topic,
