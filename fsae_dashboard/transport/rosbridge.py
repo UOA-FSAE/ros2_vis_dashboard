@@ -89,14 +89,14 @@ class RosbridgeTransport(Transport):
         return bool(self._client and self._client.is_connected)
 
     # --- discovery ---------------------------------------------------------
-    def list_topics(self) -> list[TopicInfo]:
+    def list_topics(self) -> list[TopicInfo] | None:
         if not self.connected:
-            return []
+            return None
         service = roslibpy.Service(self._client, "/rosapi/topics", "rosapi/Topics")
         try:
             result = service.call(roslibpy.ServiceRequest(), timeout=5)
         except Exception:  # noqa: BLE001
-            return []
+            return None  # timeout or connection error — caller keeps stale cache
         names = result.get("topics", [])
         types = result.get("types", [])
         pairs = zip(names, types) if len(types) == len(names) else ((n, "") for n in names)

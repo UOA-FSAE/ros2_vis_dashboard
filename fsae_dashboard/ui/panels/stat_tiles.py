@@ -15,8 +15,9 @@ from fsae_dashboard.data.fields import get_field
 from fsae_dashboard.ui.field_picker import FieldPickerDialog
 from fsae_dashboard.ui.panels.base import Panel, register_panel
 
-# named AS states for the /moa/as_status enum
-_AS_STATES = {0: "OFF", 1: "READY", 2: "DRIVING", 3: "EMERGENCY", 4: "FINISHED", 5: "MANUAL"}
+# named AS states for the /fsae/mission/as_status enum (as_status_node ordering:
+# 0 finished, 1 emergency, 2 ready, 3 driving, 4 off — see ARCHITECTURE.md)
+_AS_STATES = {0: "FINISHED", 1: "EMERGENCY", 2: "READY", 3: "DRIVING", 4: "OFF"}
 
 
 class _Tile(QFrame):

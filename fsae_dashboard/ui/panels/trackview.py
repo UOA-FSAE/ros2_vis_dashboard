@@ -2,7 +2,7 @@
 
 This is the practical replacement for an embedded RViz: everything a driverless
 debug session actually looks at, rendered by pyqtgraph at 60 fps. Each layer is
-bound to a topic (defaults match the /moa stack) and drawn only when data is
+bound to a topic (defaults match the /fsae stack) and drawn only when data is
 present, so it degrades gracefully on a half-connected stack.
 """
 from __future__ import annotations
@@ -22,18 +22,18 @@ from PySide6.QtWidgets import (
 from fsae_dashboard.ui.panels.base import Panel, register_panel
 
 _DEFAULTS = {
-    "car_topic": "/moa/car_position",
-    "trajectory_topic": "/moa/selected_trajectory",
-    "left_topic": "/moa/left_track",
-    "right_topic": "/moa/right_track",
-    "detections_topic": "/moa/zed/cone_detection",
+    "car_topic": "/fsae/slam/car_position",
+    "trajectory_topic": "/fsae/planning/selected_trajectory",
+    "left_topic": "/fsae/slam/left_track",
+    "right_topic": "/fsae/slam/right_track",
+    "detections_topic": "/fsae/perception/cone_detection",
 }
 _TYPES = {
     "car_topic": "geometry_msgs/Pose",
     "trajectory_topic": "geometry_msgs/PoseArray",
     "left_topic": "fsae_interfaces/Track",
     "right_topic": "fsae_interfaces/Track",
-    "detections_topic": "fsae_interfaces/Detections",
+    "detections_topic": "fsae_interfaces/ConeDetection",
 }
 
 

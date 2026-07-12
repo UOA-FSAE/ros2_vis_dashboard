@@ -33,6 +33,7 @@ class FieldPickerDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.topic_combo = QComboBox()
+        ctx.subs.topics_changed.connect(self._populate_topics)
         topics = ctx.subs.list_topics()
         for ti in topics:
             self.topic_combo.addItem(ti.name, ti.type)
@@ -58,6 +59,18 @@ class FieldPickerDialog(QDialog):
 
         self.topic_combo.currentIndexChanged.connect(self._sample_topic)
         if topics:
+            self._sample_topic()
+
+    def _populate_topics(self, topics) -> None:
+        current = self.topic_combo.currentText()
+        self.topic_combo.blockSignals(True)
+        self.topic_combo.clear()
+        for ti in topics:
+            self.topic_combo.addItem(ti.name, ti.type)
+        if current:
+            self.topic_combo.setCurrentText(current)
+        self.topic_combo.blockSignals(False)
+        if not current and self.topic_combo.count() > 0:
             self._sample_topic()
 
     def _sample_topic(self) -> None:

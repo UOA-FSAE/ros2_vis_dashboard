@@ -17,37 +17,51 @@ from fsae_dashboard.transport.base import (
     Transport,
 )
 
-# topic -> ROS type, mirrors the real stack (see IMPLEMENTATION_PLAN.md §1).
+# topic -> ROS type, mirrors the real stack (see fsae_autonomous docs/ARCHITECTURE.md
+# — the authoritative connection table). Everything lives under the /fsae namespace,
+# split into perception/ slam/ planning/ control/ hardware/ mission/.
 _TOPICS: dict[str, str] = {
-    "/moa/cmd_vel": "ackermann_msgs/AckermannDriveStamped",
-    "/moa/drive_vis": "ackermann_msgs/AckermannDrive",
-    "/moa/car_position": "geometry_msgs/Pose",
-    "/moa/zed/car_velocity": "geometry_msgs/Vector3",
-    "/moa/selected_trajectory": "geometry_msgs/PoseArray",
-    "/moa/left_track": "fsae_interfaces/Track",
-    "/moa/right_track": "fsae_interfaces/Track",
-    "/moa/zed/cone_detection": "fsae_interfaces/Detections",
-    "/moa/battery_state": "sensor_msgs/BatteryState",
-    "/moa/glv_state": "sensor_msgs/BatteryState",
-    "/moa/as_status": "std_msgs/UInt8",
-    "/moa/pub_raw_can": "fsae_interfaces/CANStamped",
-    "/moa/imu/data": "sensor_msgs/Imu",
+    "/fsae/control/cmd_vel": "ackermann_msgs/AckermannDriveStamped",
+    "/fsae/control/drive": "ackermann_msgs/AckermannDrive",
+    "/fsae/control/drive_vis": "ackermann_msgs/AckermannDrive",
+    "/fsae/slam/car_position": "geometry_msgs/Pose",
+    "/fsae/slam/car_velocity": "geometry_msgs/Vector3",
+    "/fsae/slam/left_track": "fsae_interfaces/Track",
+    "/fsae/slam/right_track": "fsae_interfaces/Track",
+    "/fsae/planning/selected_trajectory": "geometry_msgs/PoseArray",
+    "/fsae/perception/cone_detection": "fsae_interfaces/ConeDetection",
+    "/fsae/perception/image": "sensor_msgs/Image",
+    "/fsae/hardware/can_tx": "fsae_interfaces/CANStamped",
+    "/fsae/hardware/can_rx": "fsae_interfaces/CANStamped",
+    "/fsae/hardware/battery_state": "sensor_msgs/BatteryState",
+    "/fsae/hardware/glv_state": "sensor_msgs/BatteryState",
+    "/fsae/hardware/drive_status": "ackermann_msgs/AckermannDriveStamped",
+    "/fsae/hardware/curr_vel": "ackermann_msgs/AckermannDriveStamped",
+    "/fsae/hardware/hardware_state": "fsae_interfaces/HardwareStatesStamped",
+    "/fsae/mission/mission_status": "fsae_interfaces/MissionStatesStamped",
+    "/fsae/mission/as_status": "std_msgs/UInt8",
 }
 
 _RATE_HZ: dict[str, float] = {
-    "/moa/cmd_vel": 30.0,
-    "/moa/drive_vis": 30.0,
-    "/moa/car_position": 30.0,
-    "/moa/zed/car_velocity": 30.0,
-    "/moa/selected_trajectory": 10.0,
-    "/moa/left_track": 5.0,
-    "/moa/right_track": 5.0,
-    "/moa/zed/cone_detection": 15.0,
-    "/moa/battery_state": 2.0,
-    "/moa/glv_state": 2.0,
-    "/moa/as_status": 1.0,
-    "/moa/pub_raw_can": 100.0,
-    "/moa/imu/data": 100.0,
+    "/fsae/control/cmd_vel": 30.0,
+    "/fsae/control/drive": 30.0,
+    "/fsae/control/drive_vis": 30.0,
+    "/fsae/slam/car_position": 30.0,
+    "/fsae/slam/car_velocity": 30.0,
+    "/fsae/slam/left_track": 5.0,
+    "/fsae/slam/right_track": 5.0,
+    "/fsae/planning/selected_trajectory": 10.0,
+    "/fsae/perception/cone_detection": 15.0,
+    "/fsae/perception/image": 5.0,
+    "/fsae/hardware/can_tx": 100.0,
+    "/fsae/hardware/can_rx": 20.0,
+    "/fsae/hardware/battery_state": 2.0,
+    "/fsae/hardware/glv_state": 2.0,
+    "/fsae/hardware/drive_status": 20.0,
+    "/fsae/hardware/curr_vel": 20.0,
+    "/fsae/hardware/hardware_state": 5.0,
+    "/fsae/mission/mission_status": 1.0,
+    "/fsae/mission/as_status": 1.0,
 }
 
 
@@ -63,6 +77,49 @@ def _pose(x: float, y: float, yaw: float) -> dict:
     return {
         "position": _point(x, y),
         "orientation": {"x": 0.0, "y": 0.0, "z": math.sin(yaw / 2), "w": math.cos(yaw / 2)},
+    }
+
+
+def _pose_yaw_in_w(x: float, y: float, yaw: float) -> dict:
+    """Car pose the way the real stack publishes slam/car_position.
+
+    The camera node repurposes ``orientation.w`` to carry the yaw angle (rad)
+    directly rather than a real quaternion (see ARCHITECTURE.md — "yaw (rad)
+    repurposed into orientation.w"). TrackView's ``_car_yaw`` detects the
+    non-unit norm and reads ``w`` as the heading, so we reproduce that here.
+    """
+    return {
+        "position": _point(x, y),
+        "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": yaw},
+    }
+
+
+def _synthetic_image(t: float, w: int = 160, h: int = 120) -> dict:
+    """A small synthetic rgb8 sensor_msgs/Image so the camera panel has a feed.
+
+    The real ``perception/image`` is the annotated ZED frame; here we just draw a
+    moving vertical bar over a gradient. Data is a flat list of byte ints, which
+    is how rosbridge delivers uint8[] and what CameraPanel._as_bytes accepts.
+    """
+    bar = int((t * 40) % w)
+    data = bytearray(w * h * 3)
+    for x in range(w):
+        r = (x * 255) // w
+        # highlight a moving column
+        g = 220 if abs(x - bar) < 3 else (x * 128) // w
+        b = 255 - r
+        col = (r & 0xFF, g & 0xFF, b & 0xFF)
+        for y in range(h):
+            i = (y * w + x) * 3
+            data[i], data[i + 1], data[i + 2] = col
+    return {
+        "header": {"stamp": _stamp(t), "frame_id": "camera_link"},
+        "height": h,
+        "width": w,
+        "encoding": "rgb8",
+        "is_bigendian": 0,
+        "step": w * 3,
+        "data": list(data),
     }
 
 
@@ -155,7 +212,11 @@ class MockTransport(Transport):
         speed = 8.0 + 1.5 * math.sin(0.5 * t)
         steer = 0.35 * math.sin(0.5 * t)
 
-        if topic == "/moa/cmd_vel":
+        # actual (fed-back) motion lags the command slightly
+        act_speed = speed - 0.3
+        act_steer = steer * 0.9
+
+        if topic == "/fsae/control/cmd_vel":
             return {
                 "header": {"stamp": _stamp(now), "frame_id": "base_link"},
                 "drive": {
@@ -166,42 +227,48 @@ class MockTransport(Transport):
                     "jerk": 0.0,
                 },
             }
-        if topic == "/moa/drive_vis":
-            return {"steering_angle": steer, "speed": speed, "acceleration": 0.0, "jerk": 0.0}
-        if topic == "/moa/car_position":
-            return _pose(cx, cy, yaw)
-        if topic == "/moa/zed/car_velocity":
+        if topic in ("/fsae/control/drive", "/fsae/control/drive_vis"):
+            return {"steering_angle": steer, "steering_angle_velocity": 0.0,
+                    "speed": speed, "acceleration": 0.0, "jerk": 0.0}
+        if topic == "/fsae/slam/car_position":
+            # yaw is repurposed into orientation.w by the real camera node
+            return _pose_yaw_in_w(cx, cy, yaw)
+        if topic == "/fsae/slam/car_velocity":
             return _point(speed * math.cos(yaw), speed * math.sin(yaw), 0.0)
-        if topic == "/moa/selected_trajectory":
+        if topic == "/fsae/planning/selected_trajectory":
             poses = []
             for i in range(20):
                 a = theta + 0.02 * i
                 poses.append(_pose(radius * math.cos(a), radius * math.sin(a), a + math.pi / 2))
             return {"header": {"stamp": _stamp(now), "frame_id": "map"}, "poses": poses}
-        if topic in ("/moa/left_track", "/moa/right_track"):
-            offset = 2.0 if topic == "/moa/left_track" else -2.0
+        if topic in ("/fsae/slam/left_track", "/fsae/slam/right_track"):
+            offset = 2.0 if topic == "/fsae/slam/left_track" else -2.0
             cones = []
             for i in range(40):
                 a = 0.157 * i
                 r = radius + offset
                 cones.append(_point(r * math.cos(a), r * math.sin(a)))
             return {"cones": cones}
-        if topic == "/moa/zed/cone_detection":
-            # Cones ahead of the car in the car's local frame.
+        if topic == "/fsae/perception/cone_detection":
+            # Cones ahead of the car in the car's local frame. ConeDetection now
+            # carries a header (camera capture stamp) alongside the embedded pose.
             blue, yellow = [], []
             for i in range(6):
                 d = 3.0 + 2.0 * i
                 blue.append(_point(d, 2.0 + 0.1 * math.sin(t + i)))
                 yellow.append(_point(d, -2.0 + 0.1 * math.cos(t + i)))
             return {
-                "car_pose": _pose(0.0, 0.0, 0.0),
+                "header": {"stamp": _stamp(now), "frame_id": "camera_link"},
+                "car_pose": _pose(cx, cy, yaw),
                 "yellow": yellow,
                 "blue": blue,
                 "small_orange": [],
                 "big_orange": [_point(1.0, 0.0)],
             }
-        if topic in ("/moa/battery_state", "/moa/glv_state"):
-            base = 58.0 if topic == "/moa/battery_state" else 13.2
+        if topic == "/fsae/perception/image":
+            return _synthetic_image(now)
+        if topic in ("/fsae/hardware/battery_state", "/fsae/hardware/glv_state"):
+            base = 58.0 if topic == "/fsae/hardware/battery_state" else 13.2
             drop = 0.0005 * t
             return {
                 "voltage": base - drop,
@@ -209,23 +276,52 @@ class MockTransport(Transport):
                 "percentage": max(0.0, 1.0 - 0.001 * t),
                 "temperature": 32.0 + 3.0 * math.sin(0.1 * t),
             }
-        if topic == "/moa/as_status":
-            # cycle through AS states 0..5 slowly
-            return {"data": int(t / 5) % 6}
-        if topic == "/moa/pub_raw_can":
-            can_id = 0x300 + (int(t * 10) % 4)
+        if topic in ("/fsae/hardware/drive_status", "/fsae/hardware/curr_vel"):
+            # velocity/steering feedback from the car, as AckermannDriveStamped
+            return {
+                "header": {"stamp": _stamp(now), "frame_id": "base_link"},
+                "drive": {
+                    "steering_angle": act_steer,
+                    "steering_angle_velocity": 0.0,
+                    "speed": act_speed,
+                    "acceleration": 0.0,
+                    "jerk": 0.0,
+                },
+            }
+        if topic == "/fsae/hardware/hardware_state":
+            return {
+                "header": {"stamp": _stamp(now), "frame_id": "base_link"},
+                "hardware_states": {
+                    "ebs_active": 0,
+                    "ts_active": 1,
+                    "in_gear": 1,
+                    "master_switch_on": 1,
+                    "asb_ready": 1,
+                    "brakes_engaged": 0,
+                },
+            }
+        if topic == "/fsae/mission/mission_status":
+            return {
+                "header": {"stamp": _stamp(now), "frame_id": "base_link"},
+                "mission_states": {"mission_selected": 1, "mission_finished": 0},
+            }
+        if topic == "/fsae/mission/as_status":
+            # AS state enum: 0 finished, 1 emergency, 2 ready, 3 driving, 4 off.
+            # Sit in DRIVING for the demo.
+            return {"data": 3}
+        if topic == "/fsae/hardware/can_tx":
+            # outbound Ackermann command frame (id 0x300)
             data = [(int(t * 50) + i) & 0xFF for i in range(8)]
             return {
                 "header": {"stamp": _stamp(now), "frame_id": "can"},
-                "can": {"id": can_id, "is_rtr": False, "dlc": 8, "data": data},
+                "can": {"id": 0x300, "is_rtr": False, "data": data},
             }
-        if topic == "/moa/imu/data":
+        if topic == "/fsae/hardware/can_rx":
+            # inbound frames off the bus — cycle a few ids the decoder cares about
+            can_id = (0x300, 0x301, 0x602)[int(t * 5) % 3]
+            data = [(int(t * 30) + i) & 0xFF for i in range(8)]
             return {
-                "header": {"stamp": _stamp(now), "frame_id": "imu"},
-                "linear_acceleration": _point(
-                    2.0 * math.sin(2 * t), 3.0 * math.cos(1.5 * t), 9.81
-                ),
-                "angular_velocity": _point(0.0, 0.0, 0.4 * math.sin(0.5 * t)),
-                "orientation": {"x": 0.0, "y": 0.0, "z": math.sin(yaw / 2), "w": math.cos(yaw / 2)},
+                "header": {"stamp": _stamp(now), "frame_id": "can"},
+                "can": {"id": can_id, "is_rtr": False, "data": data},
             }
         return {}

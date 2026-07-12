@@ -30,6 +30,8 @@ class SubscriptionManager(QObject):
         self._handles: dict[str, SubscriptionHandle] = {}
         self._types: dict[str, str] = {}
         self._throttle: dict[str, int] = {}
+        self._cached_topics: list[TopicInfo] = []
+        self._fetching = False
 
     # --- transport lifecycle ----------------------------------------------
     def set_transport(self, transport: Transport | None) -> None:
@@ -43,6 +45,8 @@ class SubscriptionManager(QObject):
                 self._transport.stop()
             self._transport = transport
             self._handles.clear()
+            self._cached_topics = []
+            self._fetching = False
             if transport is not None:
                 transport.set_status_callback(self._on_status)
                 transport.start()
@@ -64,15 +68,39 @@ class SubscriptionManager(QObject):
 
     # --- topic discovery ---------------------------------------------------
     def list_topics(self) -> list[TopicInfo]:
+        """Return cached topics immediately and kick off a background refresh.
+
+        The fresh result arrives via the topics_changed signal so callers must
+        connect to that signal to receive updates without blocking the UI thread.
+        """
         if self._transport is None:
             return []
-        topics = self._transport.list_topics()
         with self._lock:
-            for ti in topics:
-                if ti.type:
-                    self._types[ti.name] = ti.type
-        self.topics_changed.emit(topics)
-        return topics
+            if self._fetching:
+                return list(self._cached_topics)
+            self._fetching = True
+            transport = self._transport
+            cached = list(self._cached_topics)
+
+        def _fetch():
+            try:
+                topics = transport.list_topics()
+                if topics is None:
+                    return  # service call failed; keep stale cache, don't clear panels
+                with self._lock:
+                    if self._transport is not transport:
+                        return  # transport changed; discard stale result
+                    self._cached_topics = topics
+                    for ti in topics:
+                        if ti.type:
+                            self._types[ti.name] = ti.type
+                self.topics_changed.emit(topics)
+            finally:
+                with self._lock:
+                    self._fetching = False
+
+        threading.Thread(target=_fetch, name="list_topics", daemon=True).start()
+        return cached
 
     def type_of(self, topic: str) -> str:
         return self._types.get(topic, "")
@@ -97,6 +125,10 @@ class SubscriptionManager(QObject):
                 self._refcount.pop(topic, None)
                 self._teardown(topic)
 
+    # Minimum ms between image frames sent over the WebSocket. Image topics
+    # without this cap easily saturate the link and delay all other topics.
+    _IMAGE_THROTTLE_MS = 500  # 2 fps max
+
     def _establish(self, topic: str) -> None:
         if self._transport is None or topic in self._handles:
             return
@@ -104,12 +136,15 @@ class SubscriptionManager(QObject):
         if not msg_type:
             # can't subscribe without a type; will retry once discovery fills it
             return
+        throttle = self._throttle.get(topic, 0)
+        if throttle == 0 and "Image" in msg_type:
+            throttle = self._IMAGE_THROTTLE_MS
         try:
             handle = self._transport.subscribe(
                 topic,
                 msg_type,
                 lambda msg, t=topic: self.hub.ingest(t, msg),
-                throttle_rate=self._throttle.get(topic, 0),
+                throttle_rate=throttle,
             )
             self._handles[topic] = handle
         except Exception:  # noqa: BLE001

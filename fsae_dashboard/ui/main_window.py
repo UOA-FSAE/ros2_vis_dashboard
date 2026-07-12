@@ -268,14 +268,14 @@ class MainWindow(QMainWindow):
         tv = self.add_panel("trackview", area=Qt.LeftDockWidgetArea)
         ts = self.add_panel("timeseries", area=Qt.RightDockWidgetArea,
                             config={"history_s": 30, "series": [
-                                {"topic": "/moa/cmd_vel", "type": "ackermann_msgs/AckermannDriveStamped",
+                                {"topic": "/fsae/control/cmd_vel", "type": "ackermann_msgs/AckermannDriveStamped",
                                  "field": "drive.speed", "label": "speed"},
-                                {"topic": "/moa/cmd_vel", "type": "ackermann_msgs/AckermannDriveStamped",
+                                {"topic": "/fsae/control/cmd_vel", "type": "ackermann_msgs/AckermannDriveStamped",
                                  "field": "drive.steering_angle", "label": "steer"},
                             ]})
         stats = self.add_panel("stat_tiles", area=Qt.RightDockWidgetArea, config={"tiles": [
-            {"topic": "/moa/as_status", "type": "std_msgs/UInt8", "field": "data", "label": "AS state", "fmt": "{:.0f}"},
-            {"topic": "/moa/battery_state", "type": "sensor_msgs/BatteryState", "field": "voltage", "label": "HV battery (V)", "fmt": "{:.1f}"},
+            {"topic": "/fsae/mission/as_status", "type": "std_msgs/UInt8", "field": "data", "label": "AS state", "fmt": "{:.0f}"},
+            {"topic": "/fsae/hardware/battery_state", "type": "sensor_msgs/BatteryState", "field": "voltage", "label": "HV battery (V)", "fmt": "{:.1f}"},
         ]})
         browser = self.add_panel("topic_browser", area=Qt.BottomDockWidgetArea)
         self.splitDockWidget(self._docks[ts], self._docks[stats], Qt.Vertical)

@@ -55,13 +55,17 @@ class RawInspectorPanel(Panel):
         self.view.setStyleSheet("font-family:Consolas,monospace;font-size:12px;")
         root.addWidget(self.view)
         self.topic_combo.currentTextChanged.connect(self._on_topic_changed)
+        self.ctx.subs.topics_changed.connect(self._populate_topics)
         self._reload_topics()
 
     def _reload_topics(self) -> None:
+        self.ctx.subs.list_topics()
+
+    def _populate_topics(self, topics) -> None:
         current = self.topic_combo.currentText()
         self.topic_combo.blockSignals(True)
         self.topic_combo.clear()
-        for ti in self.ctx.subs.list_topics():
+        for ti in topics:
             self.topic_combo.addItem(ti.name, ti.type)
         if current:
             self.topic_combo.setCurrentText(current)

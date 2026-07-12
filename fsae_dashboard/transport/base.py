@@ -58,8 +58,8 @@ class Transport(ABC):
 
     # --- discovery ---------------------------------------------------------
     @abstractmethod
-    def list_topics(self) -> list[TopicInfo]:
-        """Return currently advertised topics. May block briefly."""
+    def list_topics(self) -> list[TopicInfo] | None:
+        """Return currently advertised topics, or None on failure. May block briefly."""
 
     # --- pub/sub -----------------------------------------------------------
     @abstractmethod

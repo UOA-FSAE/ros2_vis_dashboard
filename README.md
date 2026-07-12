@@ -49,8 +49,10 @@ Once the bridge is running, in the app: **Connection → Connect…**
   Tick *Launch bridge on connect* to start rosbridge remotely over SSH.
 
 Topic names are **discovered live** (Topic Browser → *Refresh topics*) rather
-than hard-coded, so the current `zed/` topic-prefix bug in the stack is visible
-immediately instead of silently breaking a panel.
+than hard-coded, so a topic that has been renamed or isn't publishing is visible
+immediately instead of silently breaking a panel. The stack publishes everything
+under the **`/fsae`** namespace (`perception/`, `slam/`, `planning/`, `control/`,
+`hardware/`, `mission/`); the default panels bind to those names.
 
 ## Jetson / remote stack setup
 
@@ -77,15 +79,15 @@ sudo systemctl enable --now ssh
 **3. Launch the bridge** (in a sourced shell, alongside the autonomous stack):
 
 ```bash
-source /opt/ros/$ROS_DISTRO/setup.bash
-source ~/ros2_ws/install/setup.bash          # your workspace, if types live there
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch rosbridge_server rosbridge_websocket_launch.xml     # listens on :9090
 ```
 
 > Sourcing the workspace matters: rosbridge must know the custom
 > `fsae_interfaces` message types to serialise them. Launch the bridge from a
 > shell that has `install/setup.bash` sourced, or you'll get empty/failed
-> subscriptions for `Detections`, `Track`, `ConeMap`, etc.
+> subscriptions for `ConeDetection`, `Track`, `CANStamped`, etc.
 
 **4. Verify from the laptop** before opening the app:
 
@@ -98,9 +100,8 @@ nc -vz <jetson-ip> 9090
 
 **5. (Optional) Start the bridge automatically.** Either tick *Launch bridge on
 connect* in the connection dialog (runs it over SSH for the session), or add it
-to the stack's launch. The `gocart_autonomous.launch.py` already has a
-commented-out bridge block — swapping the foxglove node for rosbridge there
-makes the bridge come up with the car.
+to the stack's launch (alongside `autonomous.launch.py`) so the bridge comes up
+with the car.
 
 ### Networking notes / gotchas
 
@@ -135,15 +136,14 @@ and verify the bridge is serving this dashboard correctly:
 > 4. Start `ros2 launch rosbridge_server rosbridge_websocket_launch.xml`, then
 >    verify it's up: check the port is listening (`ss -ltn | grep 9090`), call
 >    the `/rosapi/topics` service to confirm discovery works, and echo one
->    custom-type topic (e.g. a `Detections` or `Track` topic) to confirm it
+>    custom-type topic (e.g. a `ConeDetection` or `Track` topic) to confirm it
 >    serialises without error.
 > 5. Report the Jetson's IP address and the exact command to relaunch the
 >    bridge. If any topic fails to serialise over rosbridge, tell me which type
 >    and why.
 >
-> Optionally, add a `dashboard.launch.py` to the `gocart_bringup` package that
-> brings up rosbridge (port 9090) plus the image throttler, with a topic
-> whitelist parameter, so the bridge starts with the car.
+> Optionally, add a `dashboard.launch.py` to the stack that brings up rosbridge
+> (port 9090) with a topic whitelist parameter, so the bridge starts with the car.
 
 ## Panels
 

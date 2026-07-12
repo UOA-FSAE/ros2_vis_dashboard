@@ -2,7 +2,8 @@
 
 Subscribing here makes data flow into the hub so other panels' field pickers can
 sample it, and so the rate column is populated. It's the discovery-driven
-counter to hard-coded topic names (see the zed/ prefix bug in the plan).
+counter to hard-coded topic names: it shows whatever the stack is actually
+publishing under /fsae, so a renamed or silent topic is obvious at a glance.
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ class TopicBrowserPanel(Panel):
         self.table.setColumnWidth(2, 200)
         root.addWidget(self.table)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.ctx.subs.topics_changed.connect(self._populate_topics)
 
     def get_config(self) -> dict:
         return {"subscribed": sorted(self._subscribed)}
@@ -69,7 +71,9 @@ class TopicBrowserPanel(Panel):
             self.subscribe(topic, self.ctx.subs.type_of(topic))
 
     def reload(self) -> None:
-        topics = self.ctx.subs.list_topics()
+        self.ctx.subs.list_topics()
+
+    def _populate_topics(self, topics) -> None:
         self.table.blockSignals(True)
         self.table.setRowCount(len(topics))
         self._rows.clear()
