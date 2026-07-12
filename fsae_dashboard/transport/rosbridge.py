@@ -1,0 +1,120 @@
+"""rosbridge_server transport via roslibpy (WebSocket).
+
+Works against `rosbridge_suite` or `foxglove_bridge` (rosbridge-compatible).
+No ROS install required on this machine: messages arrive as dicts and topic
+discovery uses the rosapi service. CBOR compression avoids the JSON-encoding
+performance trap for images and large arrays.
+"""
+from __future__ import annotations
+
+import threading
+
+from fsae_dashboard.transport.base import (
+    MessageCallback,
+    SubscriptionHandle,
+    TopicInfo,
+    Transport,
+)
+
+try:
+    import roslibpy
+except ImportError:  # pragma: no cover - optional dependency
+    roslibpy = None
+
+
+class RosbridgeTransport(Transport):
+    kind = "rosbridge"
+
+    def __init__(self, host: str = "localhost", port: int = 9090):
+        super().__init__()
+        if roslibpy is None:
+            raise RuntimeError(
+                "roslibpy is not installed. Run: pip install roslibpy"
+            )
+        self.host = host
+        self.port = port
+        self._client: "roslibpy.Ros | None" = None
+        self._topics: dict[str, "roslibpy.Topic"] = {}
+        self._lock = threading.Lock()
+
+    # --- lifecycle ---------------------------------------------------------
+    def start(self) -> None:
+        self._client = roslibpy.Ros(host=self.host, port=self.port)
+        self._client.on_ready(lambda: self._emit_status(True, f"{self.host}:{self.port}"))
+
+        def _run():
+            try:
+                self._client.run(timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                self._emit_status(False, f"connect failed: {exc}")
+
+        threading.Thread(target=_run, name="rosbridge", daemon=True).start()
+
+    def stop(self) -> None:
+        with self._lock:
+            for topic in list(self._topics.values()):
+                try:
+                    topic.unsubscribe()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._topics.clear()
+        if self._client is not None:
+            try:
+                self._client.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        self._client = None
+        self._emit_status(False, "disconnected")
+
+    @property
+    def connected(self) -> bool:
+        return bool(self._client and self._client.is_connected)
+
+    # --- discovery ---------------------------------------------------------
+    def list_topics(self) -> list[TopicInfo]:
+        if not self.connected:
+            return []
+        service = roslibpy.Service(self._client, "/rosapi/topics", "rosapi/Topics")
+        try:
+            result = service.call(roslibpy.ServiceRequest(), timeout=5)
+        except Exception:  # noqa: BLE001
+            return []
+        names = result.get("topics", [])
+        types = result.get("types", [])
+        pairs = zip(names, types) if len(types) == len(names) else ((n, "") for n in names)
+        return [TopicInfo(name=n, type=t) for n, t in pairs]
+
+    # --- pub/sub -----------------------------------------------------------
+    def subscribe(
+        self,
+        topic: str,
+        msg_type: str,
+        callback: MessageCallback,
+        throttle_rate: int = 0,
+        compression: str | None = None,
+    ) -> SubscriptionHandle:
+        if self._client is None:
+            raise RuntimeError("Transport not started")
+        # cbor is a good default; images benefit from cbor-raw.
+        comp = compression or ("cbor-raw" if "Image" in msg_type else "cbor")
+        ros_topic = roslibpy.Topic(
+            self._client,
+            topic,
+            msg_type,
+            throttle_rate=throttle_rate,
+            queue_length=1,
+            compression=comp,
+        )
+        ros_topic.subscribe(callback)
+        with self._lock:
+            self._topics[topic] = ros_topic
+        return SubscriptionHandle(topic, ros_topic)
+
+    def unsubscribe(self, handle: SubscriptionHandle) -> None:
+        ros_topic = handle.token
+        try:
+            ros_topic.unsubscribe()
+        except Exception:  # noqa: BLE001
+            pass
+        with self._lock:
+            self._topics.pop(handle.topic, None)

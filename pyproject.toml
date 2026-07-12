@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fsae-dashboard"
+version = "0.1.0"
+description = "Real-time telemetry dashboard for the UOA-FSAE autonomous ROS 2 stack"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "numpy>=1.24",
+    "roslibpy>=1.5",
+    "asyncssh>=2.14",
+    "PyYAML>=6.0",
+    "platformdirs>=3.0",
+    "keyring>=24.0",
+]
+
+[project.scripts]
+fsae-dashboard = "fsae_dashboard.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fsae_dashboard*"]

@@ -1,0 +1,15 @@
+# Core UI + plotting
+PySide6>=6.6
+pyqtgraph>=0.13
+numpy>=1.24
+
+# ROS 2 data plane over WebSocket (no local ROS install required)
+roslibpy>=1.5
+
+# SSH connection / tunnelling / remote launch
+asyncssh>=2.14
+
+# Config + credentials
+PyYAML>=6.0
+platformdirs>=3.0
+keyring>=24.0
