@@ -34,19 +34,15 @@ browser, all updating. Use **Add Panel** to add more, drag panels around to dock
 
 ## Connecting to the car
 
-On the **Jetson**, run a rosbridge-compatible bridge (either works):
+This app speaks the **rosbridge protocol** (`rosbridge_suite`, port 9090). It
+does **not** speak the Foxglove WebSocket protocol, so `foxglove_bridge` (port
+8765) will *not* work — you need `rosbridge_server` running on the Jetson. See
+[Jetson / remote stack setup](#jetson--remote-stack-setup) below to install it.
 
-```bash
-# rosbridge
-ros2 launch rosbridge_server rosbridge_websocket_launch.xml       # port 9090
-# or the foxglove bridge already vendored in the autonomous repo
-ros2 run foxglove_bridge foxglove_bridge                          # port 8765
-```
+Once the bridge is running, in the app: **Connection → Connect…**
 
-Then in the app: **Connection → Connect…**
-
-- **Data source:** `rosbridge`
-- **Bridge host/port:** the Jetson's IP and bridge port (e.g. `9090`)
+- **Data source:** `rosbridge` (the default)
+- **Bridge host/port:** the Jetson's IP and `9090`
 - **SSH tunnel** (recommended over Wi-Fi): tick it, enter the Jetson's SSH
   host/user/password-or-key. The data plane then connects to a forwarded
   `localhost` port — encrypted, and immune to DDS discovery / multicast issues.
@@ -55,6 +51,99 @@ Then in the app: **Connection → Connect…**
 Topic names are **discovered live** (Topic Browser → *Refresh topics*) rather
 than hard-coded, so the current `zed/` topic-prefix bug in the stack is visible
 immediately instead of silently breaking a panel.
+
+## Jetson / remote stack setup
+
+Do this once on the Jetson (or any machine running the ROS 2 stack). Substitute
+your ROS distro for `$ROS_DISTRO` — the Jetson currently runs **Humble**, the
+autonomous PCs run **Jazzy**.
+
+**1. Install the rosbridge suite** (provides `rosbridge_server` + `rosapi`, which
+the app uses for live topic discovery):
+
+```bash
+sudo apt update
+sudo apt install -y ros-$ROS_DISTRO-rosbridge-suite
+```
+
+**2. Make sure an SSH server is running** (only needed for the SSH-tunnel option,
+which is recommended over Wi-Fi):
+
+```bash
+sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
+```
+
+**3. Launch the bridge** (in a sourced shell, alongside the autonomous stack):
+
+```bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+source ~/ros2_ws/install/setup.bash          # your workspace, if types live there
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml     # listens on :9090
+```
+
+> Sourcing the workspace matters: rosbridge must know the custom
+> `fsae_interfaces` message types to serialise them. Launch the bridge from a
+> shell that has `install/setup.bash` sourced, or you'll get empty/failed
+> subscriptions for `Detections`, `Track`, `ConeMap`, etc.
+
+**4. Verify from the laptop** before opening the app:
+
+```bash
+# reachable?
+ping <jetson-ip>
+# bridge port open? (use the SSH tunnel if this is blocked by Wi-Fi/firewall)
+nc -vz <jetson-ip> 9090
+```
+
+**5. (Optional) Start the bridge automatically.** Either tick *Launch bridge on
+connect* in the connection dialog (runs it over SSH for the session), or add it
+to the stack's launch. The `gocart_autonomous.launch.py` already has a
+commented-out bridge block — swapping the foxglove node for rosbridge there
+makes the bridge come up with the car.
+
+### Networking notes / gotchas
+
+- **Port 9090** must be reachable, or use the SSH tunnel (which forwards it over
+  port 22 and needs nothing else open). At a competition Wi-Fi network the
+  tunnel is the reliable choice.
+- **QoS:** some perception topics publish with `SensorDataQoS` (BEST_EFFORT).
+  rosbridge subscribes RELIABLE by default and still receives BEST_EFFORT
+  publishers, so this normally just works; if a specific high-rate topic shows
+  no data, that's the first thing to check.
+- **Type names:** the app auto-converts `pkg/Type` → `pkg/msg/Type`, so either
+  form in a saved layout is fine.
+
+### Setting it up with Claude Code on the Jetson
+
+If the Jetson has [Claude Code](https://claude.com/claude-code) installed, you
+can paste this prompt into a session **on the Jetson** to have it do the setup
+and verify the bridge is serving this dashboard correctly:
+
+> Set up a rosbridge WebSocket bridge on this machine so a remote telemetry
+> dashboard (a rosbridge-protocol client, **not** Foxglove) can connect on port
+> 9090.
+>
+> 1. Detect the ROS 2 distro (`echo $ROS_DISTRO`) and install
+>    `ros-$ROS_DISTRO-rosbridge-suite` if it isn't already present.
+> 2. Make sure `openssh-server` is installed and the `ssh` service is running,
+>    so the dashboard can tunnel port 9090 over SSH.
+> 3. Find this repo's ROS 2 workspace, build it if needed, and confirm the
+>    custom `fsae_interfaces` messages are on the path. Launch rosbridge from a
+>    shell that has both `/opt/ros/$ROS_DISTRO/setup.bash` and the workspace's
+>    `install/setup.bash` sourced (otherwise custom types won't serialise).
+> 4. Start `ros2 launch rosbridge_server rosbridge_websocket_launch.xml`, then
+>    verify it's up: check the port is listening (`ss -ltn | grep 9090`), call
+>    the `/rosapi/topics` service to confirm discovery works, and echo one
+>    custom-type topic (e.g. a `Detections` or `Track` topic) to confirm it
+>    serialises without error.
+> 5. Report the Jetson's IP address and the exact command to relaunch the
+>    bridge. If any topic fails to serialise over rosbridge, tell me which type
+>    and why.
+>
+> Optionally, add a `dashboard.launch.py` to the `gocart_bringup` package that
+> brings up rosbridge (port 9090) plus the image throttler, with a topic
+> whitelist parameter, so the bridge starts with the car.
 
 ## Panels
 

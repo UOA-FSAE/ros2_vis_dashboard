@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QHBoxLayout,
     QHeaderView,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -37,9 +39,23 @@ class TopicBrowserPanel(Panel):
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Sub", "Topic", "Type", "Hz"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # Let the dock shrink freely no matter how many rows: the table keeps a
+        # tiny minimum size and scrolls, instead of forcing its content height
+        # onto the dock and squeezing neighbouring panels.
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.table.setMinimumSize(60, 60)
+        self.table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        self.table.setTextElideMode(Qt.ElideRight)  # long type strings elide, don't widen
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Sub checkbox
+        header.setSectionResizeMode(1, QHeaderView.Stretch)           # Topic
+        header.setSectionResizeMode(2, QHeaderView.Interactive)       # Type (user-resizable)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Hz
+        self.table.setColumnWidth(2, 200)
         root.addWidget(self.table)
         self.table.itemChanged.connect(self._on_item_changed)
 

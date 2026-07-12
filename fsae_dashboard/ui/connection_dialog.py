@@ -37,8 +37,8 @@ class ConnectionDialog(QDialog):
         # transport kind
         kind_box = QFormLayout()
         self.kind = QComboBox()
-        self.kind.addItems(["mock", "rosbridge"])
-        self.kind.setCurrentText(last.get("transport", "mock"))
+        self.kind.addItems(["rosbridge", "mock"])
+        self.kind.setCurrentText(last.get("transport", "rosbridge"))
         kind_box.addRow("Data source", self.kind)
         layout.addLayout(kind_box)
 

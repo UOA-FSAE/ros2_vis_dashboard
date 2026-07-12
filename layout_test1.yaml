@@ -1,0 +1,82 @@
+version: 1
+connection:
+  transport: rosbridge
+  host: 192.168.1.97
+  port: 9090
+panels:
+- id: trackview_2f4dc6f1
+  type: trackview
+  title: Track View (2D)
+  config:
+    topics:
+      car_topic: /moa/car_position
+      trajectory_topic: /moa/selected_trajectory
+      left_topic: /moa/left_track
+      right_topic: /moa/right_track
+      detections_topic: /moa/zed/cone_detection
+    follow: true
+    yaw_offset_deg: 0.0
+- id: timeseries_30ac013d
+  type: timeseries
+  title: Time Series Plot
+  config:
+    history_s: 43
+    series:
+    - topic: /moa/cmd_vel
+      type: ackermann_msgs/AckermannDriveStamped
+      field: drive.speed
+      label: speed
+    - topic: /moa/cmd_vel
+      type: ackermann_msgs/AckermannDriveStamped
+      field: drive.steering_angle
+      label: steer
+    - topic: /battery_state
+      type: sensor_msgs/msg/BatteryState
+      field: current
+      label: battery_state.current
+    - topic: /battery_state
+      type: sensor_msgs/msg/BatteryState
+      field: power_supply_status
+      label: battery_state.power_supply_status
+- id: stat_tiles_8b60f3c7
+  type: stat_tiles
+  title: Stat Tiles
+  config:
+    tiles:
+    - topic: /moa/as_status
+      type: std_msgs/UInt8
+      field: data
+      label: AS state
+      fmt: '{:.0f}'
+    - topic: /moa/battery_state
+      type: sensor_msgs/BatteryState
+      field: voltage
+      label: HV battery (V)
+      fmt: '{:.1f}'
+    - topic: /battery_state
+      type: sensor_msgs/msg/BatteryState
+      field: current
+      label: battery_state.current
+      fmt: '{:.2f}'
+    - topic: /moa/image_throttled
+      type: sensor_msgs/msg/Image
+      field: height
+      label: image_throttled.height
+      fmt: '{:.2f}'
+    - topic: /moa/car_position
+      type: geometry_msgs/msg/Pose
+      field: orientation.z
+      label: car_position.orientation.z
+      fmt: '{:.2f}'
+    - topic: /battery_state
+      type: sensor_msgs/msg/BatteryState
+      field: temperature
+      label: battery_state.temperature
+      fmt: '{:.2f}'
+- id: topic_browser_073ccb39
+  type: topic_browser
+  title: Topic Browser
+  config:
+    subscribed: []
+layout_state: AAAA/wAAAAD9AAAAAwAAAAAAAAO+AAAC9vwCAAAAAfsAAAAkAHQAcgBhAGMAawB2AGkAZQB3AF8AMgBmADQAZABjADYAZgAxAQAAACEAAAL2AAAAcgD///8AAAABAAADvQAAAvb8AgAAAAL7AAAAJgB0AGkAbQBlAHMAZQByAGkAZQBzAF8AMwAwAGEAYwAwADEAMwBkAQAAACEAAAIAAAAAdgD////7AAAAJgBzAHQAYQB0AF8AdABpAGwAZQBzAF8AOABiADYAMABmADMAYwA3AQAAAiUAAADyAAAA1gD///8AAAADAAAHfwAAARf8AQAAAAH7AAAALAB0AG8AcABpAGMAXwBiAHIAbwB3AHMAZQByAF8AMAA3ADMAYwBjAGIAMwA5AQAAAAAAAAd/AAAAXgD///8AAAAAAAAC9gAAAAQAAAAEAAAACAAAAAj8AAAAAA==
+geometry: AdnQywADAAAAAANoAAAAoQAACuYAAAUGAAADaAAAAMAAAArmAAAFBgAAAAAAAAAADXAAAANoAAAAwAAACuYAAAUG
