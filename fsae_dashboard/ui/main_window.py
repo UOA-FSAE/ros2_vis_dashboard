@@ -7,6 +7,7 @@ different telemetry" round-trips through a single YAML file.
 """
 from __future__ import annotations
 
+import subprocess
 import uuid
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         self._docks: dict[str, _Dock] = {}
         self._current_path: str | None = None
         self._last_connection: dict = {}
+        self._local_bridge: subprocess.Popen | None = None
 
         self.subs.status_changed.connect(self._on_status)
 
@@ -172,6 +174,8 @@ class MainWindow(QMainWindow):
                     "host": "127.0.0.1",
                     "port": ssh.get("local_port", 9090),
                 }
+            elif settings.get("launch_local_bridge"):
+                self._start_local_bridge(settings.get("port", 9090))
             transport = build_transport(transport_settings)
             self.subs.set_transport(transport)
             QTimer.singleShot(800, self._refresh_topics)
@@ -192,10 +196,38 @@ class MainWindow(QMainWindow):
             cmd = f"bash -lc '{cfg.setup_command}; {_BRIDGE_LAUNCH}'"
             self.ssh.run_command_streaming(cmd, lambda line: None)
 
+    def _start_local_bridge(self, port: int) -> None:
+        """Launch rosbridge on this machine as a child process.
+
+        Used by "local" mode when the dashboard runs on the same machine that
+        publishes the topics. The process inherits the current environment, so
+        the app must be launched from a ROS-sourced shell.
+        """
+        if self._local_bridge is not None and self._local_bridge.poll() is None:
+            return  # already running from a previous connect
+        cmd = f"{_BRIDGE_LAUNCH} port:={int(port)}"
+        self._local_bridge = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _stop_local_bridge(self) -> None:
+        proc = self._local_bridge
+        self._local_bridge = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+
     def disconnect(self) -> None:
         self.subs.set_transport(None)
         if self.ssh.connected:
             self.ssh.disconnect()
+        self._stop_local_bridge()
         self._status.setText("Disconnected")
 
     def _refresh_topics(self) -> None:
@@ -286,6 +318,7 @@ class MainWindow(QMainWindow):
             self.subs.shutdown()
             if self.ssh.connected:
                 self.ssh.disconnect()
+            self._stop_local_bridge()
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(event)

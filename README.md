@@ -41,12 +41,18 @@ does **not** speak the Foxglove WebSocket protocol, so `foxglove_bridge` (port
 
 Once the bridge is running, in the app: **Connection → Connect…**
 
-- **Data source:** `rosbridge` (the default)
-- **Bridge host/port:** the Jetson's IP and `9090`
-- **SSH tunnel** (recommended over Wi-Fi): tick it, enter the Jetson's SSH
-  host/user/password-or-key. The data plane then connects to a forwarded
-  `localhost` port — encrypted, and immune to DDS discovery / multicast issues.
-  Tick *Launch bridge on connect* to start rosbridge remotely over SSH.
+- **Data source `local`** (the default): use this when the dashboard runs on the
+  **same machine** that publishes the ROS topics — no host or SSH to configure,
+  it connects straight to `127.0.0.1`. Set the bridge port (`9090`) and, if
+  rosbridge isn't already running, tick *Launch rosbridge locally on connect* to
+  start it as a child process. Launch the app from a ROS-sourced shell so it can
+  find `rosbridge_server` and your custom message types.
+- **Data source `rosbridge`:** connect to a bridge on another machine.
+  - **Bridge host/port:** the Jetson's IP and `9090`
+  - **SSH tunnel** (recommended over Wi-Fi): tick it, enter the Jetson's SSH
+    host/user/password-or-key. The data plane then connects to a forwarded
+    `localhost` port — encrypted, and immune to DDS discovery / multicast issues.
+    Tick *Launch bridge on connect* to start rosbridge remotely over SSH.
 
 Topic names are **discovered live** (Topic Browser → *Refresh topics*) rather
 than hard-coded, so a topic that has been renamed or isn't publishing is visible

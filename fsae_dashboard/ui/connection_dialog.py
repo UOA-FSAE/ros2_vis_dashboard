@@ -1,13 +1,18 @@
-"""Connection dialog: mock, direct rosbridge, or rosbridge over an SSH tunnel.
+"""Connection dialog: local, direct rosbridge, rosbridge over SSH, or mock.
 
 Produces a settings dict consumed by app wiring:
 
     {transport: "mock"}
     {transport: "rosbridge", host, port}
     {transport: "rosbridge", host: "127.0.0.1", port: <local>, ssh: {...}}
+    {transport: "rosbridge", host: "127.0.0.1", port, mode: "local",
+     launch_local_bridge: bool}
 
-When SSH is enabled, the data plane connects to a forwarded localhost port, so
-"host/port" below are the *bridge* endpoint as seen from the Jetson.
+"local" mode is for running the dashboard on the same machine that publishes
+the ROS topics: it connects straight to a rosbridge on 127.0.0.1, so there is
+no remote host to enter and no SSH tunnel. When SSH is enabled instead, the
+data plane connects to a forwarded localhost port, so "host/port" are the
+*bridge* endpoint as seen from the Jetson.
 """
 from __future__ import annotations
 
@@ -34,15 +39,29 @@ class ConnectionDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # transport kind
+        # transport kind. "local" and "rosbridge" both build a rosbridge
+        # transport; "mode" in the saved settings distinguishes them so the
+        # dialog reopens on the same tab.
         kind_box = QFormLayout()
         self.kind = QComboBox()
-        self.kind.addItems(["rosbridge", "mock"])
-        self.kind.setCurrentText(last.get("transport", "rosbridge"))
+        self.kind.addItems(["local", "rosbridge", "mock"])
+        self.kind.setCurrentText(last.get("mode", last.get("transport", "local")))
         kind_box.addRow("Data source", self.kind)
         layout.addLayout(kind_box)
 
-        # bridge endpoint
+        # local endpoint (bridge on this machine)
+        self.local_group = QGroupBox("Local (this machine)")
+        lform = QFormLayout(self.local_group)
+        self.local_bridge_port = QSpinBox()
+        self.local_bridge_port.setRange(1, 65535)
+        self.local_bridge_port.setValue(int(last.get("port", 9090)))
+        self.launch_local = QCheckBox("Launch rosbridge locally on connect")
+        self.launch_local.setChecked(bool(last.get("launch_local_bridge", False)))
+        lform.addRow("Bridge port", self.local_bridge_port)
+        lform.addRow("", self.launch_local)
+        layout.addWidget(self.local_group)
+
+        # remote bridge endpoint
         self.bridge_group = QGroupBox("Bridge (rosbridge / foxglove)")
         bform = QFormLayout(self.bridge_group)
         self.host = QLineEdit(last.get("host", "192.168.1.10"))
@@ -89,15 +108,26 @@ class ConnectionDialog(QDialog):
         self._sync_enabled()
 
     def _sync_enabled(self) -> None:
-        is_ros = self.kind.currentText() == "rosbridge"
-        self.bridge_group.setEnabled(is_ros)
-        self.ssh_group.setEnabled(is_ros)
+        kind = self.kind.currentText()
+        self.local_group.setVisible(kind == "local")
+        self.bridge_group.setVisible(kind == "rosbridge")
+        self.ssh_group.setVisible(kind == "rosbridge")
 
     def settings(self) -> dict:
         kind = self.kind.currentText()
         if kind == "mock":
             return {"transport": "mock"}
-        out: dict = {
+        if kind == "local":
+            out: dict = {
+                "transport": "rosbridge",
+                "host": "127.0.0.1",
+                "port": self.local_bridge_port.value(),
+                "mode": "local",
+            }
+            if self.launch_local.isChecked():
+                out["launch_local_bridge"] = True
+            return out
+        out = {
             "transport": "rosbridge",
             "host": self.host.text().strip(),
             "port": self.port.value(),
