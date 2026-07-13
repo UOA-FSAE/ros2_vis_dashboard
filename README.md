@@ -60,6 +60,47 @@ immediately instead of silently breaking a panel. The stack publishes everything
 under the **`/fsae`** namespace (`perception/`, `slam/`, `planning/`, `control/`,
 `hardware/`, `mission/`); the default panels bind to those names.
 
+**Disconnecting** (Connection → Disconnect) flushes all buffered data from the
+previous session — your panels and window layout stay exactly as they were, but
+old telemetry is cleared so the next connection starts clean.
+
+## Recording
+
+**Record → Record…** captures live telemetry to disk. A status-bar `● REC`
+indicator shows the active recording; **Record → Stop recording** ends it (it
+also stops automatically on disconnect or app exit).
+
+- **rosbag** — pick any number of topics; drives `ros2 bag record` into a
+  timestamped `rosbag_<time>/` folder, producing a real, replayable rosbag2.
+  Reads the *local* ROS graph, so it fits the *local*-mode case and does not
+  work over a remote rosbridge link. The dialog's **ROS setup** field is sourced
+  before `ros2` (auto-filled from `$ROS_DISTRO` / `/opt/ros/*`), so you don't
+  have to launch the app from a ROS-sourced shell. For **custom message types**,
+  append your workspace overlay there, e.g.
+  `source /opt/ros/jazzy/setup.bash && source ~/ws/install/setup.bash`. If the
+  recorder can't start (e.g. `ros2: command not found`), the dialog reports why.
+- **JSON** — pick one topic; writes [JSON Lines][jsonl] (one message per line)
+  and works over *any* connection, since it just taps the decoded message
+  stream. Files roll over at a configurable **records/file** and **MB/file** cap
+  into `part_0001.jsonl`, `part_0002.jsonl`, … within a timestamped folder, so a
+  single interrupted file can never take the whole recording down.
+
+[jsonl]: https://jsonlines.org
+
+## Replay
+
+**Record → Replay bag…** plays a recorded rosbag back with `ros2 bag play`.
+Pick the **Bags folder** where your bags live (remembered between sessions and
+shared as the default record location), choose a bag from the list, set the
+**playback rate** and optional **Loop**, then *Play*. A status-bar `▶` shows the
+active replay; **Record → Stop replay** ends it, and it clears itself when a
+non-looping bag finishes.
+
+Replay publishes into the **local ROS graph**, so — like rosbag recording — it
+needs ROS 2 on this machine. To *watch* the replay, connect in **local** mode
+(to a local rosbridge): the replayed topics then show up in your panels like any
+live data. The same **ROS setup** / workspace-overlay note as recording applies.
+
 ## Jetson / remote stack setup
 
 Do this once on the Jetson (or any machine running the ROS 2 stack). Substitute

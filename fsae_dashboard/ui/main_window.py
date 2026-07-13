@@ -23,9 +23,12 @@ from PySide6.QtWidgets import (
 from fsae_dashboard import config as cfgmod
 from fsae_dashboard.data.hub import DataHub
 from fsae_dashboard.data.subscriptions import SubscriptionManager
+from fsae_dashboard.recording import BagPlayer, JsonRecorder, RosbagRecorder
 from fsae_dashboard.ssh import SSHConfig, SSHManager
 from fsae_dashboard.transport import build_transport
 from fsae_dashboard.ui.connection_dialog import ConnectionDialog
+from fsae_dashboard.ui.record_dialog import RecordDialog
+from fsae_dashboard.ui.replay_dialog import ReplayDialog
 from fsae_dashboard.ui.context import AppContext
 from fsae_dashboard.ui.panels import create_panel, panel_types
 
@@ -72,10 +75,17 @@ class MainWindow(QMainWindow):
         self._current_path: str | None = None
         self._last_connection: dict = {}
         self._local_bridge: subprocess.Popen | None = None
+        self._recorder: object | None = None
+        self._player: object | None = None
+        self._bags_dir: str = cfgmod.default_bags_dir()
 
         self.subs.status_changed.connect(self._on_status)
 
         self._build_menus()
+        self._replay_status = QLabel("")
+        self.statusBar().addPermanentWidget(self._replay_status)
+        self._rec_status = QLabel("")
+        self.statusBar().addPermanentWidget(self._rec_status)
         self._status = QLabel("Disconnected")
         self.statusBar().addPermanentWidget(self._status)
 
@@ -93,6 +103,23 @@ class MainWindow(QMainWindow):
         act_disconnect.triggered.connect(self.disconnect)
         conn.addAction(act_connect)
         conn.addAction(act_disconnect)
+
+        rec = self.menuBar().addMenu("&Record")
+        self._act_record = QAction("Record…", self)
+        self._act_record.triggered.connect(self.open_record_dialog)
+        self._act_stop_record = QAction("Stop recording", self)
+        self._act_stop_record.triggered.connect(self.stop_recording)
+        self._act_stop_record.setEnabled(False)
+        rec.addAction(self._act_record)
+        rec.addAction(self._act_stop_record)
+        rec.addSeparator()
+        self._act_replay = QAction("Replay bag…", self)
+        self._act_replay.triggered.connect(self.open_replay_dialog)
+        self._act_stop_replay = QAction("Stop replay", self)
+        self._act_stop_replay.triggered.connect(self.stop_replay)
+        self._act_stop_replay.setEnabled(False)
+        rec.addAction(self._act_replay)
+        rec.addAction(self._act_stop_replay)
 
         add = self.menuBar().addMenu("&Add Panel")
         for cls in panel_types():
@@ -155,6 +182,32 @@ class MainWindow(QMainWindow):
                 panel.on_tick()
             except Exception:  # noqa: BLE001 - one bad panel must not stall the loop
                 pass
+        rec = self._recorder
+        if rec is not None:
+            if getattr(rec, "active", True):
+                self._rec_status.setText(f"● REC  {rec.status}")
+            else:
+                # recorder ended on its own (e.g. ros2 bag process exited)
+                err = getattr(rec, "error_text", lambda: "")()
+                self.stop_recording()
+                if err:
+                    QMessageBox.warning(
+                        self, "Recording stopped",
+                        "The recorder exited unexpectedly:\n\n" + err[-2000:],
+                    )
+        player = self._player
+        if player is not None and not player.active:
+            # Ended on its own: normal finish (rc 0) vs. a real failure. Gate the
+            # dialog on the exit code — ros2 bag play logs to stderr even on a
+            # clean finish, so stderr-presence alone would false-positive.
+            rc = player.returncode
+            err = player.error_text()
+            self.stop_replay()
+            if rc not in (0, None):
+                msg = "Playback exited unexpectedly."
+                if err:
+                    msg += "\n\n" + err[-2000:]
+                QMessageBox.warning(self, "Replay stopped", msg)
 
     # --- connection --------------------------------------------------------
     def open_connection_dialog(self) -> None:
@@ -224,11 +277,127 @@ class MainWindow(QMainWindow):
             proc.kill()
 
     def disconnect(self) -> None:
+        # Recording depends on the live transport, so tear it down first.
+        self.stop_recording()
         self.subs.set_transport(None)
         if self.ssh.connected:
             self.ssh.disconnect()
         self._stop_local_bridge()
+        # Flush stale data from the previous connection. The layout is
+        # untouched; panels re-create empty series on their next tick.
+        self.hub.clear()
         self._status.setText("Disconnected")
+
+    # --- recording ---------------------------------------------------------
+    def open_record_dialog(self) -> None:
+        if self._recorder is not None:
+            QMessageBox.information(self, "Recording", "A recording is already in progress.")
+            return
+        topics = self.subs.list_topics()
+        dlg = RecordDialog(topics, out_dir=self._bags_dir, parent=self)
+        if dlg.exec():
+            cfg = dlg.settings()
+            self._remember_bags_dir(cfg.get("out_dir"))
+            self.start_recording(cfg)
+
+    def start_recording(self, cfg: dict) -> None:
+        try:
+            if cfg["format"] == "rosbag":
+                if not cfg.get("topics"):
+                    QMessageBox.warning(self, "Recording", "Select at least one topic.")
+                    return
+                recorder = RosbagRecorder(
+                    cfg["topics"], cfg.get("out_dir"), cfg.get("setup_command")
+                )
+            else:
+                if not cfg.get("topic"):
+                    QMessageBox.warning(self, "Recording", "Select a topic to record.")
+                    return
+                recorder = JsonRecorder(
+                    self.hub,
+                    self.subs,
+                    cfg["topic"],
+                    cfg.get("msg_type", ""),
+                    cfg.get("out_dir"),
+                    cfg.get("max_records", 50_000),
+                    cfg.get("max_bytes", 100 * 1024 * 1024),
+                )
+            recorder.start()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Recording failed", str(exc))
+            return
+        self._recorder = recorder
+        self._act_record.setEnabled(False)
+        self._act_stop_record.setEnabled(True)
+        self._rec_status.setText(f"● REC  {recorder.status}")
+
+    def stop_recording(self) -> None:
+        recorder = self._recorder
+        self._recorder = None
+        if recorder is not None:
+            try:
+                recorder.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._act_record.setEnabled(True)
+        self._act_stop_record.setEnabled(False)
+        self._rec_status.setText("")
+
+    # --- replay ------------------------------------------------------------
+    def _remember_bags_dir(self, path: str | None) -> None:
+        if path and path != self._bags_dir:
+            self._bags_dir = path
+            try:
+                cfgmod.set_bags_dir(path)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def open_replay_dialog(self) -> None:
+        if self._player is not None:
+            QMessageBox.information(self, "Replay", "A replay is already in progress.")
+            return
+        dlg = ReplayDialog(self._bags_dir, parent=self)
+        if dlg.exec():
+            cfg = dlg.settings()
+            self._remember_bags_dir(cfg.get("bags_dir"))
+            self.start_replay(cfg)
+
+    def start_replay(self, cfg: dict) -> None:
+        if not cfg.get("bag_path"):
+            QMessageBox.warning(self, "Replay", "Select a bag to play.")
+            return
+        try:
+            player = BagPlayer(
+                cfg["bag_path"],
+                cfg.get("setup_command"),
+                cfg.get("rate", 1.0),
+                cfg.get("loop", False),
+            )
+            player.start()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Replay failed", str(exc))
+            return
+        self._player = player
+        self._act_replay.setEnabled(False)
+        self._act_stop_replay.setEnabled(True)
+        self._replay_status.setText(f"▶ {player.status}")
+        if self._last_connection.get("transport") != "rosbridge":
+            self.statusBar().showMessage(
+                "Replaying into the local ROS graph — connect in local mode to view it.",
+                6000,
+            )
+
+    def stop_replay(self) -> None:
+        player = self._player
+        self._player = None
+        if player is not None:
+            try:
+                player.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._act_replay.setEnabled(True)
+        self._act_stop_replay.setEnabled(False)
+        self._replay_status.setText("")
 
     def _refresh_topics(self) -> None:
         self.subs.list_topics()
@@ -315,6 +484,8 @@ class MainWindow(QMainWindow):
     # --- shutdown ----------------------------------------------------------
     def closeEvent(self, event):  # noqa: N802
         try:
+            self.stop_recording()
+            self.stop_replay()
             self.subs.shutdown()
             if self.ssh.connected:
                 self.ssh.disconnect()

@@ -41,6 +41,35 @@ def default_layout_path() -> Path:
     return config_dir() / "layout.yaml"
 
 
+def prefs_path() -> Path:
+    """Small global preferences, distinct from per-layout dashboard configs."""
+    return config_dir() / "prefs.yaml"
+
+
+def load_prefs() -> dict[str, Any]:
+    p = prefs_path()
+    if not p.exists():
+        return {}
+    with p.open("r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def save_prefs(prefs: dict[str, Any]) -> None:
+    with prefs_path().open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(prefs, fh, sort_keys=True)
+
+
+def default_bags_dir() -> str:
+    """Where rosbags are recorded to / replayed from. User-chosen, remembered."""
+    return load_prefs().get("bags_dir") or str(Path.home() / "fsae_bags")
+
+
+def set_bags_dir(path: str) -> None:
+    prefs = load_prefs()
+    prefs["bags_dir"] = path
+    save_prefs(prefs)
+
+
 def empty_config() -> dict[str, Any]:
     return {
         "version": CONFIG_VERSION,

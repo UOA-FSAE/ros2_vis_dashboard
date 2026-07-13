@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from typing import Callable
 
 import numpy as np
 
@@ -63,6 +64,24 @@ class DataHub:
         self._series: dict[tuple[str, str], Series] = {}
         self._rates: dict[str, _RateTracker] = {}
         self._first_seen: dict[str, float] = {}
+        # (topic, msg, t) taps — used by recorders to observe every message.
+        self._listeners: list[Callable[[str, dict, float], None]] = []
+
+    # --- taps (recorders etc.) --------------------------------------------
+    def add_listener(self, cb: Callable[[str, dict, float], None]) -> None:
+        """Register a callback fired for every ingested message: cb(topic, msg, t).
+
+        Called on the transport thread. Callbacks must be quick and must not
+        raise; exceptions are swallowed so one bad tap can't stall ingestion.
+        """
+        with self._lock:
+            if cb not in self._listeners:
+                self._listeners.append(cb)
+
+    def remove_listener(self, cb: Callable[[str, dict, float], None]) -> None:
+        with self._lock:
+            if cb in self._listeners:
+                self._listeners.remove(cb)
 
     # --- write side (transport threads) -----------------------------------
     def ingest(self, topic: str, msg: dict) -> None:
@@ -78,6 +97,14 @@ class DataHub:
                 val = get_field(msg, field)
                 if val is not None:
                     series.append(now, val)
+            listeners = list(self._listeners)
+        # fire taps outside the lock: writing a recording to disk must not
+        # block other ingesting threads or the UI-thread readers.
+        for cb in listeners:
+            try:
+                cb(topic, msg, now)
+            except Exception:  # noqa: BLE001
+                pass
 
     # --- read side (Qt thread) --------------------------------------------
     def latest(self, topic: str) -> dict | None:
