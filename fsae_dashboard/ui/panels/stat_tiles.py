@@ -97,6 +97,11 @@ class StatTilesPanel(Panel):
         self.release_all()
         self._tiles.clear()
 
+    def clear(self) -> None:
+        # Keep the tiles (that's config), just blank their last-held reading.
+        for t in self._tiles:
+            t["tile"].set_value("—")
+
     def on_tick(self) -> None:
         for t in self._tiles:
             msg = self.ctx.hub.latest(t["topic"])

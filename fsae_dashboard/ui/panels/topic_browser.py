@@ -99,6 +99,13 @@ class TopicBrowserPanel(Panel):
         else:
             self.release(topic)
 
+    def clear(self) -> None:
+        # Keep the discovered topic list; just reset the live rate column.
+        for row in self._rows.values():
+            cell = self.table.item(row, 3)
+            if cell is not None:
+                cell.setText("—")
+
     def on_tick(self) -> None:
         for topic, row in self._rows.items():
             cell = self.table.item(row, 3)

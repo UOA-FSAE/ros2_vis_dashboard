@@ -86,6 +86,10 @@ class RawInspectorPanel(Panel):
         if topic:
             self.topic_combo.setCurrentText(topic)
 
+    def clear(self) -> None:
+        self._last_update = 0.0
+        self.view.clear()
+
     def on_tick(self) -> None:
         now = time.time()
         if now - self._last_update < 0.1 or not self._topic:  # 10 Hz text refresh

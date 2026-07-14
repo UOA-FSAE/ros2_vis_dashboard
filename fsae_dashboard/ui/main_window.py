@@ -103,6 +103,12 @@ class MainWindow(QMainWindow):
         act_disconnect.triggered.connect(self.disconnect)
         conn.addAction(act_connect)
         conn.addAction(act_disconnect)
+        conn.addSeparator()
+        act_flush = QAction("Clear Retained Data", self)
+        act_flush.setShortcut("Ctrl+Shift+K")
+        act_flush.setToolTip("Drop all cached telemetry and blank every panel")
+        act_flush.triggered.connect(self.flush_data)
+        conn.addAction(act_flush)
 
         rec = self.menuBar().addMenu("&Record")
         self._act_record = QAction("Record…", self)
@@ -285,8 +291,26 @@ class MainWindow(QMainWindow):
         self._stop_local_bridge()
         # Flush stale data from the previous connection. The layout is
         # untouched; panels re-create empty series on their next tick.
-        self.hub.clear()
+        self.flush_data()
         self._status.setText("Disconnected")
+
+    def flush_data(self) -> None:
+        """Clear all retained telemetry: the shared hub and every panel's own
+        local buffers/rendered widgets.
+
+        ``hub.clear()`` alone leaves stale state behind because panels cache
+        their own data (line curves, CAN tables, the track trail, the last
+        camera frame) and only repaint when fresh data arrives. This resets both
+        so nothing from a previous connection lingers on screen. Layout, panels,
+        and subscriptions are preserved.
+        """
+        self.hub.clear()
+        for panel in list(self._panels.values()):
+            try:
+                panel.clear()
+            except Exception:  # noqa: BLE001 - one bad panel must not block the flush
+                pass
+        self.statusBar().showMessage("Cleared all retained data", 3000)
 
     # --- recording ---------------------------------------------------------
     def open_record_dialog(self) -> None:

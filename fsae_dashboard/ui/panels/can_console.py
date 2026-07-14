@@ -99,6 +99,10 @@ class CanConsolePanel(Panel):
         if topic:
             self.topic_combo.setCurrentText(topic)
 
+    def clear(self) -> None:
+        self._by_id.clear()
+        self.table.setRowCount(0)
+
     def on_tick(self) -> None:
         if not self._topic:
             return

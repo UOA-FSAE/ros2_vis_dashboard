@@ -117,6 +117,12 @@ class TimeSeriesPanel(Panel):
         if not any(s["topic"] == series["topic"] for s in self._series):
             self.release(series["topic"])
 
+    def clear(self) -> None:
+        # Curves only redraw when new samples arrive, so a stale line lingers
+        # after the hub is flushed unless we blank each curve now.
+        for s in self._series:
+            s["curve"].setData([], [])
+
     # --- render ------------------------------------------------------------
     def on_tick(self) -> None:
         now = time.time()

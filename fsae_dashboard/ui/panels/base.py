@@ -62,6 +62,16 @@ class Panel(QWidget):
     def on_tick(self) -> None:
         """Repaint from the DataHub. Called on the UI thread at the render rate."""
 
+    def clear(self) -> None:
+        """Drop any telemetry this panel has retained locally and blank its view.
+
+        Called on a manual data flush / cache reset. Panels keep their own
+        buffers and last-drawn widgets that outlive a ``DataHub.clear()`` (curves
+        only redraw when new data arrives, tables cache rows, etc.), so each
+        panel must reset that state here. Subscriptions and config are untouched;
+        the panel refills naturally once data flows again.
+        """
+
     # --- subscription helpers ---------------------------------------------
     def subscribe(self, topic: str, msg_type: str = "", throttle_rate: int = 0) -> None:
         if topic and topic not in self._subscribed:

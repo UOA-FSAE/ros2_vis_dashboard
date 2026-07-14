@@ -94,6 +94,14 @@ class CameraPanel(Panel):
         if topic:
             self.topic_combo.setCurrentText(topic)
 
+    def clear(self) -> None:
+        self._frames = 0
+        self._fps_t0 = time.time()
+        self._fps = 0.0
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText("waiting for frames…")
+        self.status.setText("")
+
     def on_tick(self) -> None:
         if not self._topic:
             return

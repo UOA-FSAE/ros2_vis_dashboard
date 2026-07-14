@@ -8,15 +8,22 @@ present, so it degrades gracefully on a half-connected stack.
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 import pyqtgraph as pg
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from fsae_dashboard.ui.panels.base import Panel, register_panel
@@ -69,6 +76,174 @@ def _car_yaw(q: dict) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def _fmt_lap(seconds: float | None) -> str:
+    """Format a lap duration as ``M:SS.mmm`` (or ``SS.mmm`` under a minute)."""
+    if seconds is None:
+        return "—"
+    minutes = int(seconds // 60)
+    rem = seconds - minutes * 60
+    return f"{minutes}:{rem:06.3f}" if minutes else f"{rem:.3f}"
+
+
+class _LapTimer:
+    """Detects laps from the car's xy track and records per-lap durations.
+
+    The car's first observed position becomes a virtual start/finish line. A lap
+    is booked once the car has driven clear of that line (past ``leave_radius``)
+    and later returns within ``arm_radius`` of it. The two radii give hysteresis
+    so sitting on the line can't double-count. Purely position-driven, so it
+    needs no extra topic and works the same live or on replay.
+    """
+
+    def __init__(self, arm_radius: float = 3.0, leave_radius: float = 6.0):
+        self.arm_radius = arm_radius
+        self.leave_radius = leave_radius
+        self.reset()
+
+    def reset(self) -> None:
+        self._start: tuple[float, float] | None = None
+        self._lap_start_t: float | None = None
+        self._left = False
+        self.laps: list[float] = []
+
+    def update(self, x: float, y: float, t: float) -> bool:
+        """Feed a car position (+ timestamp); return True if a lap just closed."""
+        if self._start is None:
+            self._start = (x, y)
+            self._lap_start_t = t
+            return False
+        d = math.hypot(x - self._start[0], y - self._start[1])
+        if not self._left:
+            if d > self.leave_radius:
+                self._left = True
+            return False
+        if d < self.arm_radius:
+            self.laps.append(t - self._lap_start_t)
+            self._lap_start_t = t
+            self._left = False
+            return True
+        return False
+
+    def current(self, now: float) -> float:
+        return (now - self._lap_start_t) if self._lap_start_t is not None else 0.0
+
+    @property
+    def best(self) -> float | None:
+        return min(self.laps) if self.laps else None
+
+    @property
+    def last(self) -> float | None:
+        return self.laps[-1] if self.laps else None
+
+
+class _LapWidget(QFrame):
+    """Compact, draggable, collapsible lap-time readout overlaid on the plot."""
+
+    def __init__(self, parent: QWidget, on_export, on_reset):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame{background:rgba(20,20,20,220);border:1px solid #333;border-radius:6px;}"
+            " QLabel{color:#ddd;} QPushButton{color:#ddd;}"
+        )
+        self.setMaximumWidth(210)
+        self._collapsed = False
+        self._drag_from: QPoint | None = None
+        self._drag_orig: QPoint | None = None
+        self._moved = False  # True once the user has dragged it somewhere
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 6)
+        lay.setSpacing(2)
+
+        header = QHBoxLayout()
+        self._toggle = QPushButton("▾ Lap times")
+        self._toggle.setFlat(True)
+        self._toggle.setCursor(Qt.PointingHandCursor)
+        self._toggle.setStyleSheet(
+            "QPushButton{color:#fff;font-weight:600;border:none;text-align:left;}"
+        )
+        self._toggle.clicked.connect(self.toggle_collapsed)
+        header.addWidget(self._toggle)
+        header.addStretch(1)
+        self._summary = QLabel("—")  # shown only while collapsed
+        self._summary.setStyleSheet("color:#57D9A3;font-weight:600;")
+        self._summary.setVisible(False)
+        header.addWidget(self._summary)
+        lay.addLayout(header)
+
+        self._body = QWidget()
+        body = QVBoxLayout(self._body)
+        body.setContentsMargins(0, 2, 0, 0)
+        body.setSpacing(1)
+        self._count = QLabel("Lap #1")
+        self._cur = QLabel("Cur   —")
+        self._last = QLabel("Last  —")
+        self._best = QLabel("Best  —")
+        self._cur.setStyleSheet("color:#57D9A3;font-size:15px;font-weight:600;")
+        self._best.setStyleSheet("color:#FFB000;")
+        for w in (self._count, self._cur, self._last, self._best):
+            body.addWidget(w)
+        btns = QHBoxLayout()
+        exp = QPushButton("Export…")
+        exp.clicked.connect(on_export)
+        rst = QPushButton("Reset")
+        rst.clicked.connect(on_reset)
+        btns.addWidget(exp)
+        btns.addWidget(rst)
+        body.addLayout(btns)
+        lay.addWidget(self._body)
+
+    # --- collapse ----------------------------------------------------------
+    def toggle_collapsed(self) -> None:
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = collapsed
+        self._body.setVisible(not collapsed)
+        self._summary.setVisible(collapsed)
+        self._toggle.setText("▸ Lap times" if collapsed else "▾ Lap times")
+        self.adjustSize()
+
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    # --- drag within the parent viewport -----------------------------------
+    def mousePressEvent(self, event):  # noqa: N802 (Qt override)
+        if event.button() == Qt.LeftButton:
+            self._drag_from = event.globalPosition().toPoint()
+            self._drag_orig = self.pos()
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._drag_from is not None:
+            delta = event.globalPosition().toPoint() - self._drag_from
+            self.move(self._drag_orig + delta)
+            self.clamp_into_parent()
+            self._moved = True
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        self._drag_from = None
+
+    def clamp_into_parent(self) -> None:
+        """Keep the widget fully inside the plot even after a drag or resize."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        max_x = max(0, parent.width() - self.width())
+        max_y = max(0, parent.height() - self.height())
+        self.move(min(max(0, self.x()), max_x), min(max(0, self.y()), max_y))
+
+    # --- data --------------------------------------------------------------
+    def update_stats(self, timer: _LapTimer, now: float) -> None:
+        cur = _fmt_lap(timer.current(now)) if timer.laps or timer._lap_start_t else "—"
+        self._count.setText(f"Lap #{len(timer.laps) + 1}")
+        self._cur.setText(f"Cur   {cur}")
+        self._last.setText(f"Last  {_fmt_lap(timer.last)}")
+        self._best.setText(f"Best  {_fmt_lap(timer.best)}")
+        self._summary.setText(cur)
+
+
 @register_panel
 class TrackViewPanel(Panel):
     panel_type = "trackview"
@@ -78,6 +253,7 @@ class TrackViewPanel(Panel):
         self._topics = dict(_DEFAULTS)
         self._trail: list[tuple[float, float]] = []
         self._yaw_offset = 0.0  # radians, added to car heading for detections
+        self._laps = _LapTimer()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(2, 2, 2, 2)
@@ -85,6 +261,14 @@ class TrackViewPanel(Panel):
         toolbar = QHBoxLayout()
         self.follow_cb = QCheckBox("Follow car")
         toolbar.addWidget(self.follow_cb)
+        self.walls_cb = QCheckBox("Cone walls")
+        self.walls_cb.setChecked(True)
+        self.walls_cb.setToolTip(
+            "Show the left/right track boundaries from /fsae/slam/*_track.\n"
+            "Uncheck to hide them (e.g. when the sim isn't publishing walls)."
+        )
+        self.walls_cb.toggled.connect(self._on_walls_toggled)
+        toolbar.addWidget(self.walls_cb)
         toolbar.addStretch(1)
         toolbar.addWidget(QLabel("Heading offset °"))
         self.yaw_spin = QDoubleSpinBox()
@@ -114,30 +298,99 @@ class TrackViewPanel(Panel):
         for item in (self.blue_scatter, self.yellow_scatter, self.orange_scatter, self.car_scatter):
             self.plot.addItem(item)
 
+        # Lap-time readout floats over the plot: draggable, collapsible.
+        self.lap_widget = _LapWidget(self.plot, self._export_laps, self._reset_laps)
+        self._lap_pos: tuple[int, int] | None = None  # remembered top-left, if moved
+        self.lap_widget.show()
+
     def get_config(self) -> dict:
         return {
             "topics": self._topics,
             "follow": self.follow_cb.isChecked(),
             "yaw_offset_deg": self.yaw_spin.value(),
+            "show_walls": self.walls_cb.isChecked(),
+            "laps_collapsed": self.lap_widget.collapsed,
+            "lap_pos": list(self._lap_pos) if self._lap_pos else None,
         }
 
     def apply_config(self, config: dict) -> None:
         self._topics.update(config.get("topics", {}))
         self.follow_cb.setChecked(bool(config.get("follow", False)))
         self.yaw_spin.setValue(float(config.get("yaw_offset_deg", 0.0)))
+        self.walls_cb.setChecked(bool(config.get("show_walls", True)))
+        self.lap_widget.set_collapsed(bool(config.get("laps_collapsed", False)))
+        pos = config.get("lap_pos")
+        if pos and len(pos) == 2:
+            self._lap_pos = (int(pos[0]), int(pos[1]))
         for key, topic in self._topics.items():
             if topic:
                 self.subscribe(topic, _TYPES.get(key, ""))
 
+    def clear(self) -> None:
+        self._trail = []
+        self._laps.reset()
+        self.lap_widget.update_stats(self._laps, time.time())
+        for curve in (self.left_curve, self.right_curve, self.traj_curve, self.trail_curve):
+            curve.setData([], [])
+        for scatter in (self.blue_scatter, self.yellow_scatter, self.orange_scatter, self.car_scatter):
+            scatter.clear()
+
+    # --- toolbar / lap actions ---------------------------------------------
+    def _on_walls_toggled(self, on: bool) -> None:
+        self.left_curve.setVisible(on)
+        self.right_curve.setVisible(on)
+        if not on:  # drop the stale boundary so nothing lingers behind the hide
+            self.left_curve.setData([], [])
+            self.right_curve.setData([], [])
+
+    def _reset_laps(self) -> None:
+        self._laps.reset()
+        self.lap_widget.update_stats(self._laps, time.time())
+
+    def _export_laps(self) -> None:
+        if not self._laps.laps:
+            QMessageBox.information(self, "Export lap times", "No completed laps to export yet.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export lap times", "lap_times.txt", "Text files (*.txt)"
+        )
+        if not path:
+            return
+        laps = self._laps.laps
+        best = self._laps.best
+        lines = ["FSAE Track View — lap times", f"Total laps: {len(laps)}", ""]
+        for i, t in enumerate(laps, 1):
+            mark = "  *best" if t == best else ""
+            lines.append(f"Lap {i:>3}: {_fmt_lap(t)}{mark}")
+        lines += ["", f"Best: {_fmt_lap(best)}", f"Mean: {_fmt_lap(sum(laps) / len(laps))}"]
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.lap_widget._summary.setText("saved")  # brief acknowledgement
+
+    def _position_lap_widget(self) -> None:
+        """Place the overlay: remembered spot if the user moved it, else top-right."""
+        self.lap_widget.adjustSize()
+        if self._lap_pos is not None:
+            self.lap_widget.move(*self._lap_pos)
+        else:
+            self.lap_widget.move(max(0, self.plot.width() - self.lap_widget.width() - 12), 10)
+        self.lap_widget.clamp_into_parent()
+        self.lap_widget.raise_()
+
     def on_tick(self) -> None:
         hub = self.ctx.hub
 
-        left = _points_from((hub.latest(self._topics["left_topic"]) or {}).get("cones"))
-        if len(left):
-            self.left_curve.setData(left[:, 0], left[:, 1])
-        right = _points_from((hub.latest(self._topics["right_topic"]) or {}).get("cones"))
-        if len(right):
-            self.right_curve.setData(right[:, 0], right[:, 1])
+        if self.walls_cb.isChecked():
+            left = _points_from((hub.latest(self._topics["left_topic"]) or {}).get("cones"))
+            if len(left):
+                self.left_curve.setData(left[:, 0], left[:, 1])
+            right = _points_from((hub.latest(self._topics["right_topic"]) or {}).get("cones"))
+            if len(right):
+                self.right_curve.setData(right[:, 0], right[:, 1])
 
         traj = _points_from((hub.latest(self._topics["trajectory_topic"]) or {}).get("poses"))
         if len(traj):
@@ -154,6 +407,7 @@ class TrackViewPanel(Panel):
                 self._trail = self._trail[-2000:]
             trail = np.array(self._trail)
             self.trail_curve.setData(trail[:, 0], trail[:, 1])
+            self._laps.update(cx, cy, time.time())
 
         det = hub.latest(self._topics["detections_topic"])
         if det:
@@ -165,6 +419,13 @@ class TrackViewPanel(Panel):
         if self.follow_cb.isChecked() and car_xy:
             self.plot.setXRange(car_xy[0] - 15, car_xy[0] + 15, padding=0)
             self.plot.setYRange(car_xy[1] - 15, car_xy[1] + 15, padding=0)
+
+        # keep the lap overlay updated and pinned inside the (resizable) plot
+        self.lap_widget.update_stats(self._laps, time.time())
+        if self.lap_widget._drag_from is None:
+            if self.lap_widget._moved:
+                self._lap_pos = (self.lap_widget.x(), self.lap_widget.y())
+            self._position_lap_widget()
 
     def _draw_detections(self, det: dict, ox: float, oy: float, yaw: float) -> None:
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
