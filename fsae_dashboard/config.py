@@ -106,6 +106,50 @@ def decode_blob(text: str) -> bytes:
     return base64.b64decode(text.encode("ascii"))
 
 
+# --- layout profiles (named, selectable dashboard layouts) -----------------
+
+def _repo_root() -> Path:
+    """Repo root, where the shipped example layouts (general_layout.yaml) live."""
+    return Path(__file__).resolve().parent.parent
+
+
+# Built-in layout profiles shipped with the repo (name -> yaml path). Offered in
+# the Layout > Profiles selector whenever the backing file is present.
+BUILTIN_LAYOUT_PROFILES: dict[str, Path] = {
+    "Tommylaptop": _repo_root() / "general_layout.yaml",
+}
+
+
+def layouts_dir() -> Path:
+    """User-saved layout profiles live here, one YAML per profile."""
+    d = config_dir() / "layouts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def list_layout_profiles() -> dict[str, Path]:
+    """Ordered name -> path for every selectable layout profile.
+
+    Built-in (repo-shipped) profiles come first, then user-saved profiles
+    discovered in ``layouts_dir()`` by filename stem. A built-in name takes
+    precedence, so it stays stable even if a user file happens to share its name.
+    """
+    profiles: dict[str, Path] = {}
+    for name, path in BUILTIN_LAYOUT_PROFILES.items():
+        if path.exists():
+            profiles[name] = path
+    for p in sorted(layouts_dir().glob("*.yaml")):
+        profiles.setdefault(p.stem, p)
+    return profiles
+
+
+def save_layout_profile(name: str, cfg: dict[str, Any]) -> Path:
+    """Persist ``cfg`` as a user layout profile named ``name``; return its path."""
+    path = layouts_dir() / f"{name}.yaml"
+    save_config(path, cfg)
+    return path
+
+
 # --- connection profiles (named, reusable) ---------------------------------
 
 def load_profiles() -> dict[str, dict[str, Any]]:

@@ -13,7 +13,7 @@ connection:
     remote_port: 9090
     launch_bridge: false
 panels:
-- id: trackview_85bb4234
+- id: trackview_6e04892f
   type: trackview
   title: Track View (2D)
   config:
@@ -22,41 +22,53 @@ panels:
       trajectory_topic: /fsae/planning/selected_trajectory
       left_topic: /fsae/slam/left_track
       right_topic: /fsae/slam/right_track
-      detections_topic: /fsae/perception/cone_detection
+      detections_topic: /cone_detection_fused
     follow: false
     yaw_offset_deg: 0.0
     show_walls: true
-    laptime_enabled: false
-    laps_collapsed: false
+    laptime_enabled: true
+    laps_collapsed: true
     lap_pos: null
-- id: timeseries_6d9e7eb6
+    fusion_cloud: false
+    fusion_cloud_topic: /lidar_fusion/cone_points
+- id: timeseries_1fa420b8
   type: timeseries
   title: Time Series Plot
   config:
     history_s: 30
     series:
-    - topic: /zed/zed_node/imu/data
-      type: sensor_msgs/msg/Imu
-      field: linear_acceleration.x
-      label: data.linear_acceleration.x
-    - topic: /zed/zed_node/imu/data
-      type: sensor_msgs/msg/Imu
-      field: linear_acceleration.y
-      label: data.linear_acceleration.y
-- id: stat_tiles_11653d23
+    - topic: /fsae/control/cmd_vel
+      type: ackermann_msgs/AckermannDriveStamped
+      field: drive.speed
+      label: speed
+    - topic: /fsae/control/cmd_vel
+      type: ackermann_msgs/AckermannDriveStamped
+      field: drive.steering_angle
+      label: steer
+- id: stat_tiles_7f8b8a0c
   type: stat_tiles
   title: Stat Tiles
   config:
-    tiles: []
-- id: topic_browser_3b25703a
+    tiles:
+    - topic: /fsae/mission/as_status
+      type: std_msgs/UInt8
+      field: data
+      label: AS state
+      fmt: '{:.0f}'
+    - topic: /fsae/hardware/battery_state
+      type: sensor_msgs/BatteryState
+      field: voltage
+      label: HV battery (V)
+      fmt: '{:.1f}'
+- id: topic_browser_116e367d
   type: topic_browser
   title: Topic Browser
   config:
     subscribed: []
-- id: raw_inspector_a00ca48d
+- id: raw_inspector_c5447b63
   type: raw_inspector
   title: Raw Message Inspector
   config:
-    topic: ''
-layout_state: AAAA/wAAAAD9AAAAAgAAAAAAAAQBAAAC4/wCAAAAAfwAAAAhAAAC4wAAAHgA/////AEAAAAD+wAAACwAdABvAHAAaQBjAF8AYgByAG8AdwBzAGUAcgBfADMAYgAyADUANwAwADMAYQEAAAAAAAABVQAAAF8A////+wAAACQAdAByAGEAYwBrAHYAaQBlAHcAXwA4ADUAYgBiADQAMgAzADQBAAABWQAAAqgAAAH5AP////sAAAAeAGMAYQBtAGUAcgBhAF8AMQAwAGQAMQAyAGIAYwA2AAAAApcAAADdAAAAAAAAAAAAAAABAAAB+wAAAuP8AgAAAAL8AAAAIQAAAjUAAACOAQAAF/oAAAABAQAAAAL7AAAAJgB0AGkAbQBlAHMAZQByAGkAZQBzAF8ANgBkADkAZQA3AGUAYgA2AQAABAUAAAH7AAABFQD////7AAAALAByAGEAdwBfAGkAbgBzAHAAZQBjAHQAbwByAF8AYQAwADAAYwBhADQAOABkAQAAAAD/////AAAA2QD////7AAAAJgBzAHQAYQB0AF8AdABpAGwAZQBzAF8AMQAxADYANQAzAGQAMgAzAQAAAloAAACqAAAANgD///8AAAAAAAAC4wAAAAQAAAAEAAAACAAAAAj8AAAAAA==
-geometry: AdnQywADAAAAAAAA////+QAABf8AAAMvAAAABwAAAB4AAAXiAAADaQAAAAACAAAABgAAAAAAAAAAFwAABf8AAAMv
+    topic: /cone_detection_fused
+layout_state: AAAA/wAAAAD9AAAAAwAAAAAAAAMdAAACXvwCAAAAAfsAAAAkAHQAcgBhAGMAawB2AGkAZQB3AF8ANgBlADAANAA4ADkAMgBmAQAAACEAAAJeAAAAjAD///8AAAABAAACuwAAAl78AgAAAAL8AAAAIQAAAaEAAACOAQAAF/oAAAAAAQAAAAL7AAAAJgB0AGkAbQBlAHMAZQByAGkAZQBzAF8AMQBmAGEANAAyADAAYgA4AQAAAyEAAAK7AAABFQD////7AAAALAByAGEAdwBfAGkAbgBzAHAAZQBjAHQAbwByAF8AYwA1ADQANAA3AGIANgAzAQAAAAD/////AAAA2QD////7AAAAJgBzAHQAYQB0AF8AdABpAGwAZQBzAF8ANwBmADgAYgA4AGEAMABjAQAAAcYAAAC5AAAAhgD///8AAAADAAAF3AAAALT8AQAAAAH7AAAALAB0AG8AcABpAGMAXwBiAHIAbwB3AHMAZQByAF8AMQAxADYAZQAzADYANwBkAQAAAAAAAAXcAAAAXwD///8AAAAAAAACXgAAAAQAAAAEAAAACAAAAAj8AAAAAA==
+geometry: AdnQywADAAAAAAAHAAAAAAAABeIAAANpAAAABwAAAB4AAAXiAAADaQAAAAAAAAAABgAAAAAHAAAAHgAABeIAAANp

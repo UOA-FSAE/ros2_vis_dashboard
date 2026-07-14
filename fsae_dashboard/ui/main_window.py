@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -143,6 +145,15 @@ class MainWindow(QMainWindow):
             act = QAction(name, self)
             act.triggered.connect(slot)
             layout.addAction(act)
+        layout.addSeparator()
+        # Layout-profile selector: pick a named layout (built-in "Tommylaptop"
+        # ships as general_layout.yaml; user profiles auto-discovered on disk).
+        # Rebuilt each time it opens so freshly-saved profiles show up.
+        self._profiles_menu = layout.addMenu("Profiles")
+        self._profiles_menu.aboutToShow.connect(self._populate_profiles_menu)
+        act_save_profile = QAction("Save Current as Profile…", self)
+        act_save_profile.triggered.connect(self.save_current_as_profile)
+        layout.addAction(act_save_profile)
 
     # --- panels ------------------------------------------------------------
     def add_panel(self, panel_type: str, panel_id: str | None = None,
@@ -459,6 +470,52 @@ class MainWindow(QMainWindow):
         if state:
             self.restoreState(QByteArray(state))
         self._last_connection = cfg.get("connection", {})
+
+    # --- layout profiles ---------------------------------------------------
+    def _populate_profiles_menu(self) -> None:
+        """Rebuild the Profiles submenu from the profiles on disk (built-in +
+        user-saved), checking the one currently loaded."""
+        menu = self._profiles_menu
+        menu.clear()
+        profiles = cfgmod.list_layout_profiles()
+        if not profiles:
+            act = menu.addAction("(no profiles)")
+            act.setEnabled(False)
+            return
+        for name, path in profiles.items():
+            act = QAction(name, self)
+            act.setCheckable(True)
+            act.setChecked(self._current_path == str(path))
+            act.setToolTip(str(path))
+            act.triggered.connect(
+                lambda _=False, p=str(path): self.load_layout_profile(p)
+            )
+            menu.addAction(act)
+
+    def load_layout_profile(self, path: str) -> None:
+        """Load a named layout profile, replacing the current panels/layout."""
+        try:
+            cfg = cfgmod.load_config(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Load profile failed", str(exc))
+            return
+        self.load_config_dict(cfg)
+        self._current_path = path
+        self.statusBar().showMessage(f"Loaded layout profile: {Path(path).stem}", 3000)
+
+    def save_current_as_profile(self) -> None:
+        """Save the current layout as a user profile that appears in the selector."""
+        name, ok = QInputDialog.getText(self, "Save layout profile", "Profile name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        try:
+            path = cfgmod.save_layout_profile(name, self.dump_config())
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save profile failed", str(exc))
+            return
+        self._current_path = str(path)
+        self.statusBar().showMessage(f"Saved layout profile: {name}", 3000)
 
     def new_layout(self) -> None:
         self._clear_panels()
