@@ -34,18 +34,27 @@ from fsae_dashboard.ui.panels.base import Panel, register_panel
 
 _DEFAULTS = {
     "car_topic": "/fsae/slam/car_position",
+    "car_odom_topic": "/fsae/slam/car_odom",
     "trajectory_topic": "/fsae/planning/selected_trajectory",
+    "target_speed_topic": "/fsae/planning/target_speed_profile",
     "left_topic": "/fsae/slam/left_track",
     "right_topic": "/fsae/slam/right_track",
     "detections_topic": "/fsae/perception/cone_detection",
 }
 _TYPES = {
-    "car_topic": "geometry_msgs/Pose",
+    "car_topic": "geometry_msgs/PoseStamped",
+    "car_odom_topic": "nav_msgs/Odometry",
     "trajectory_topic": "geometry_msgs/PoseArray",
+    "target_speed_topic": "std_msgs/Float64MultiArray",
     "left_topic": "fsae_interfaces/Track",
     "right_topic": "fsae_interfaces/Track",
     "detections_topic": "fsae_interfaces/ConeDetection",
 }
+
+# Driven-trail / planned-path speed colour gradient: slow -> fast.
+_SPEED_COLOR_SLOW = (40, 90, 235)    # blue
+_SPEED_COLOR_FAST = (230, 45, 45)    # red
+_SPEED_COLOR_UNKNOWN = (136, 136, 136)  # grey — no speed data for this point yet
 
 # Selectable cone-detection sources for the Track View. Both publish
 # fsae_interfaces/ConeDetection, so the rendering is identical; only the source
@@ -159,6 +168,44 @@ def _car_yaw(q: dict) -> float:
     if abs(norm - 1.0) > 1e-3:
         return w  # yaw stored directly in w
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _car_pose_fields(car: dict | None) -> tuple[dict, dict] | None:
+    """Return (position, orientation) dicts from car_topic, whatever its shape.
+
+    /fsae/slam/car_position moved from geometry_msgs/Pose to PoseStamped upstream
+    (to carry a measurement timestamp for the NMPC's delay compensation), which
+    nests position/orientation one level down under "pose". Support both shapes
+    so a stack still on the old plain-Pose message keeps working too.
+    """
+    if not isinstance(car, dict):
+        return None
+    if "position" in car and "orientation" in car:
+        return car["position"], car["orientation"]
+    pose = car.get("pose")
+    if isinstance(pose, dict) and "position" in pose:
+        return pose["position"], pose.get("orientation", {})
+    return None
+
+
+def _speed_color(speed: float, vmin: float, vmax: float) -> tuple[int, int, int]:
+    """Blue (slow) -> red (fast), linearly interpolated and clamped to [vmin, vmax]."""
+    t = 0.0 if vmax <= vmin else (speed - vmin) / (vmax - vmin)
+    t = max(0.0, min(1.0, t))
+    return tuple(
+        int(lo + t * (hi - lo)) for lo, hi in zip(_SPEED_COLOR_SLOW, _SPEED_COLOR_FAST)
+    )
+
+
+def _odom_speed(odom: dict | None) -> float | None:
+    """Instantaneous speed (m/s) from a nav_msgs/Odometry-shaped dict, or None."""
+    if not isinstance(odom, dict):
+        return None
+    twist = odom.get("twist", {}).get("twist", {})
+    linear = twist.get("linear")
+    if not isinstance(linear, dict):
+        return None
+    return math.hypot(linear.get("x", 0.0), linear.get("y", 0.0))
 
 
 def _fmt_lap(seconds: float | None) -> str:
@@ -339,7 +386,7 @@ class TrackViewPanel(Panel):
 
     def build_ui(self) -> None:
         self._topics = dict(_DEFAULTS)
-        self._trail: list[tuple[float, float]] = []
+        self._trail: list[tuple[float, float, float | None]] = []  # x, y, actual speed (m/s)
         self._yaw_offset = 0.0  # radians, added to car heading for detections
         self._laps = _LapTimer()
 
@@ -369,6 +416,14 @@ class TrackViewPanel(Panel):
             "Uncheck to hide them (e.g. when the sim isn't publishing walls)."
         )
         self.walls_cb.toggled.connect(self._on_walls_toggled)
+        self.target_speed_cb = QCheckBox("Planned-path target speed colour")
+        self.target_speed_cb.setChecked(True)
+        self.target_speed_cb.setToolTip(
+            "Colour the planned path by its curvature-based target speed "
+            "(blue=slow, red=fast), from /fsae/planning/target_speed_profile.\n"
+            "Uncheck to hide it and show the plain dashed path only."
+        )
+        self.target_speed_cb.toggled.connect(self._on_target_speed_toggled)
         self.laptime_cb = QCheckBox("Enable laptime")
         self.laptime_cb.setChecked(True)
         self.laptime_cb.setToolTip(
@@ -382,6 +437,23 @@ class TrackViewPanel(Panel):
         self.yaw_spin.valueChanged.connect(
             lambda deg: setattr(self, "_yaw_offset", math.radians(deg))
         )
+
+        # Speed-colour range for the driven trail and planned-path dots: blue at
+        # speed_min, red at speed_max. Defaults match fsae_control's curvature_speed()
+        # v_min/v_max, so out of the box both gradients line up with what the
+        # planner/controller actually target.
+        self.speed_min_spin = QDoubleSpinBox()
+        self.speed_min_spin.setRange(0.0, 100.0)
+        self.speed_min_spin.setSingleStep(0.5)
+        self.speed_min_spin.setValue(1.5)
+        self.speed_min_spin.setSuffix(" m/s")
+        self.speed_min_spin.setToolTip("Speed mapped to blue (slow) on the driven trail and planned path.")
+        self.speed_max_spin = QDoubleSpinBox()
+        self.speed_max_spin.setRange(0.1, 100.0)
+        self.speed_max_spin.setSingleStep(0.5)
+        self.speed_max_spin.setValue(15.0)
+        self.speed_max_spin.setSuffix(" m/s")
+        self.speed_max_spin.setToolTip("Speed mapped to red (fast) on the driven trail and planned path.")
 
         # Cone-data source picker: presets for the two known detectors, editable,
         # and auto-filled with any live ConeDetection topic on the bridge.
@@ -436,8 +508,22 @@ class TrackViewPanel(Panel):
 
         self.left_curve = self.plot.plot(pen=pg.mkPen("#4C9AFF", width=2))
         self.right_curve = self.plot.plot(pen=pg.mkPen("#FFB000", width=2))
-        self.traj_curve = self.plot.plot(pen=pg.mkPen("#57D9A3", width=2, style=pg.QtCore.Qt.DashLine))
-        self.trail_curve = self.plot.plot(pen=pg.mkPen("#888888", width=1))
+        # Dashed guide line tracing the planned path's shape/order, drawn ABOVE
+        # the target-speed dots (traj_speed_scatter, added below) so the path
+        # outline stays visible on top of the colour fill -- see the explicit
+        # setZValue() on traj_speed_scatter just below, which is what actually
+        # guarantees this regardless of the two items' add order.
+        self.traj_curve = self.plot.plot(pen=pg.mkPen("#57D9A3", width=1, style=pg.QtCore.Qt.DashLine))
+
+        # Driven trail and planned path are rendered as dense small dots coloured
+        # by speed (blue=slow, red=fast) rather than a flat line — see
+        # _speed_color(). trail_scatter = actual speed the car drove at each
+        # point; traj_speed_scatter = target speed the controller would command
+        # at each point of the CURRENT planned path (from target_speed_topic).
+        # Same colour scale on both, so a corner can be compared directly.
+        self.trail_scatter = pg.ScatterPlotItem(size=5, pen=None)
+        self.traj_speed_scatter = pg.ScatterPlotItem(size=7, pen=None)
+        self.traj_speed_scatter.setZValue(-1)  # keep traj_curve's dashed outline on top
 
         # fusion cloud drawn under the cones so cone markers stay legible on top
         self.fusion_scatter = pg.ScatterPlotItem(
@@ -448,7 +534,8 @@ class TrackViewPanel(Panel):
         self.small_orange_scatter = pg.ScatterPlotItem(size=8, brush=pg.mkBrush("#FF922B"))
         self.orange_scatter = pg.ScatterPlotItem(size=12, brush=pg.mkBrush("#F76707"))
         self.car_scatter = pg.ScatterPlotItem(size=16, brush=pg.mkBrush("#FF3B3B"), symbol="t")
-        for item in (self.fusion_scatter, self.blue_scatter, self.yellow_scatter,
+        for item in (self.trail_scatter, self.traj_speed_scatter, self.fusion_scatter,
+                     self.blue_scatter, self.yellow_scatter,
                      self.small_orange_scatter, self.orange_scatter, self.car_scatter):
             self.plot.addItem(item)
 
@@ -478,7 +565,10 @@ class TrackViewPanel(Panel):
             "topics": self._topics,
             "follow": self.follow_cb.isChecked(),
             "yaw_offset_deg": self.yaw_spin.value(),
+            "speed_color_min": self.speed_min_spin.value(),
+            "speed_color_max": self.speed_max_spin.value(),
             "show_walls": self.walls_cb.isChecked(),
+            "target_speed_enabled": self.target_speed_cb.isChecked(),
             "laptime_enabled": self.laptime_cb.isChecked(),
             "laps_collapsed": self.lap_widget.collapsed,
             "lap_pos": list(self._lap_pos) if self._lap_pos else None,
@@ -490,7 +580,10 @@ class TrackViewPanel(Panel):
         self._topics.update(config.get("topics", {}))
         self.follow_cb.setChecked(bool(config.get("follow", False)))
         self.yaw_spin.setValue(float(config.get("yaw_offset_deg", 0.0)))
+        self.speed_min_spin.setValue(float(config.get("speed_color_min", 1.5)))
+        self.speed_max_spin.setValue(float(config.get("speed_color_max", 15.0)))
         self.walls_cb.setChecked(bool(config.get("show_walls", True)))
+        self.target_speed_cb.setChecked(bool(config.get("target_speed_enabled", True)))
         self.laptime_cb.setChecked(bool(config.get("laptime_enabled", True)))
         self.lap_widget.set_collapsed(bool(config.get("laps_collapsed", False)))
         pos = config.get("lap_pos")
@@ -516,9 +609,10 @@ class TrackViewPanel(Panel):
         self._trail = []
         self._laps.reset()
         self.lap_widget.update_stats(self._laps, time.time())
-        for curve in (self.left_curve, self.right_curve, self.traj_curve, self.trail_curve):
+        for curve in (self.left_curve, self.right_curve, self.traj_curve):
             curve.setData([], [])
-        for scatter in (self.fusion_scatter, self.blue_scatter, self.yellow_scatter,
+        for scatter in (self.trail_scatter, self.traj_speed_scatter,
+                        self.fusion_scatter, self.blue_scatter, self.yellow_scatter,
                         self.small_orange_scatter, self.orange_scatter, self.car_scatter):
             scatter.clear()
         self._hover_points = []
@@ -536,8 +630,11 @@ class TrackViewPanel(Panel):
             form = QFormLayout(dlg)
             form.addRow(self.follow_cb)
             form.addRow(self.walls_cb)
+            form.addRow(self.target_speed_cb)
             form.addRow(self.laptime_cb)
             form.addRow("Heading offset °", self.yaw_spin)
+            form.addRow("Speed colour min", self.speed_min_spin)
+            form.addRow("Speed colour max", self.speed_max_spin)
             form.addRow("Cone data source", self.cone_source_combo)
             form.addRow(self.fusion_cb)
             form.addRow("Fusion cloud topic", self.fusion_topic_combo)
@@ -601,6 +698,11 @@ class TrackViewPanel(Panel):
             self.left_curve.setData([], [])
             self.right_curve.setData([], [])
 
+    def _on_target_speed_toggled(self, on: bool) -> None:
+        self.traj_speed_scatter.setVisible(on)
+        if not on:  # drop the stale dots so nothing lingers behind the hide
+            self.traj_speed_scatter.clear()
+
     def _on_laptime_toggled(self, on: bool) -> None:
         self.lap_widget.setVisible(on)
         if on:
@@ -661,29 +763,36 @@ class TrackViewPanel(Panel):
         traj = _points_from((hub.latest(self._topics["trajectory_topic"]) or {}).get("poses"))
         if len(traj):
             self.traj_curve.setData(traj[:, 0], traj[:, 1])
-            self._register_hover(traj, "Planned path point")
+            if self.target_speed_cb.isChecked():
+                self._draw_target_speed(traj)
+        elif self.target_speed_cb.isChecked():
+            self.traj_speed_scatter.clear()
 
         car = hub.latest(self._topics["car_topic"])
         car_xy = None
-        if car and "position" in car:
-            cx, cy = car["position"].get("x", 0.0), car["position"].get("y", 0.0)
+        pose_fields = _car_pose_fields(car)
+        if pose_fields:
+            position, orientation = pose_fields
+            cx, cy = position.get("x", 0.0), position.get("y", 0.0)
             car_xy = (cx, cy)
             self.car_scatter.setData([cx], [cy])
-            heading = _car_yaw(car["orientation"]) if "orientation" in car else 0.0
-            self._hover_points.append(
-                (cx, cy, f"Car — position ({cx:.2f}, {cy:.2f}) m, "
-                         f"heading {math.degrees(heading):.0f}°")
-            )
-            self._trail.append(car_xy)
+            heading = _car_yaw(orientation)
+            actual_speed = _odom_speed(hub.latest(self._topics["car_odom_topic"]))
+            label = (f"Car — position ({cx:.2f}, {cy:.2f}) m, "
+                     f"heading {math.degrees(heading):.0f}°")
+            if actual_speed is not None:
+                label += f", speed {actual_speed:.2f} m/s"
+            self._hover_points.append((cx, cy, label))
+
+            self._trail.append((cx, cy, actual_speed))
             if len(self._trail) > 2000:
                 self._trail = self._trail[-2000:]
-            trail = np.array(self._trail)
-            self.trail_curve.setData(trail[:, 0], trail[:, 1])
+            self._draw_trail()
             if self.laptime_cb.isChecked():
                 self._laps.update(cx, cy, time.time())
 
         # car-pose transform shared by camera detections and the fusion cloud
-        yaw = _car_yaw(car["orientation"]) if (car and "orientation" in car) else 0.0
+        yaw = _car_yaw(pose_fields[1]) if pose_fields else 0.0
         yaw += self._yaw_offset
         ox, oy = car_xy if car_xy else (0.0, 0.0)
 
@@ -706,6 +815,48 @@ class TrackViewPanel(Panel):
             if self.lap_widget._moved:
                 self._lap_pos = (self.lap_widget.x(), self.lap_widget.y())
             self._position_lap_widget()
+
+    def _draw_trail(self) -> None:
+        """Redraw the driven trail, coloured blue (slow) -> red (fast) by actual speed.
+
+        Points recorded before car_odom_topic had data (or while it's absent)
+        draw grey rather than guessing a speed — see _SPEED_COLOR_UNKNOWN.
+        """
+        if not self._trail:
+            self.trail_scatter.clear()
+            return
+        vmin, vmax = self.speed_min_spin.value(), self.speed_max_spin.value()
+        xy = np.array([(x, y) for x, y, _ in self._trail])
+        brushes = [
+            pg.mkBrush(_speed_color(s, vmin, vmax) if s is not None else _SPEED_COLOR_UNKNOWN)
+            for _, _, s in self._trail
+        ]
+        self.trail_scatter.setData(xy[:, 0], xy[:, 1], brush=brushes)
+
+    def _draw_target_speed(self, traj: np.ndarray) -> None:
+        """Colour each planned-path point by its curvature-based target speed.
+
+        target_speed_topic (std_msgs/Float64MultiArray, published by
+        fsae_control's target_speed_viz node) is index-aligned with
+        trajectory_topic's poses. If it's missing, stale, or its length
+        doesn't match the current path (the two are separate topics, so one
+        can lag the other by a tick), fall back to the plain dashed guide
+        line drawn by the caller — no colour, no crash.
+        """
+        vmin, vmax = self.speed_min_spin.value(), self.speed_max_spin.value()
+        profile = (self.ctx.hub.latest(self._topics["target_speed_topic"]) or {}).get("data")
+        if not isinstance(profile, list) or len(profile) != len(traj):
+            self.traj_speed_scatter.clear()
+            return
+        self.traj_speed_scatter.setData(
+            traj[:, 0], traj[:, 1],
+            brush=[pg.mkBrush(_speed_color(float(v), vmin, vmax)) for v in profile],
+        )
+        for i in range(len(traj)):
+            x, y, v = float(traj[i, 0]), float(traj[i, 1]), float(profile[i])
+            self._hover_points.append(
+                (x, y, f"Planned path #{i} — target speed {v:.2f} m/s at ({x:.2f}, {y:.2f}) m")
+            )
 
     def _draw_detections(self, det: dict, ox: float, oy: float, yaw: float) -> None:
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)

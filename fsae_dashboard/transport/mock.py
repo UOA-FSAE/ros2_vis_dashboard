@@ -24,11 +24,13 @@ _TOPICS: dict[str, str] = {
     "/fsae/control/cmd_vel": "ackermann_msgs/AckermannDriveStamped",
     "/fsae/control/drive": "ackermann_msgs/AckermannDrive",
     "/fsae/control/drive_vis": "ackermann_msgs/AckermannDrive",
-    "/fsae/slam/car_position": "geometry_msgs/Pose",
+    "/fsae/slam/car_position": "geometry_msgs/PoseStamped",
+    "/fsae/slam/car_odom": "nav_msgs/Odometry",
     "/fsae/slam/car_velocity": "geometry_msgs/Vector3",
     "/fsae/slam/left_track": "fsae_interfaces/Track",
     "/fsae/slam/right_track": "fsae_interfaces/Track",
     "/fsae/planning/selected_trajectory": "geometry_msgs/PoseArray",
+    "/fsae/planning/target_speed_profile": "std_msgs/Float64MultiArray",
     "/fsae/perception/cone_detection": "fsae_interfaces/ConeDetection",
     "/fsae/perception/image": "sensor_msgs/Image",
     "/fsae/hardware/can_tx": "fsae_interfaces/CANStamped",
@@ -47,10 +49,12 @@ _RATE_HZ: dict[str, float] = {
     "/fsae/control/drive": 30.0,
     "/fsae/control/drive_vis": 30.0,
     "/fsae/slam/car_position": 30.0,
+    "/fsae/slam/car_odom": 30.0,
     "/fsae/slam/car_velocity": 30.0,
     "/fsae/slam/left_track": 5.0,
     "/fsae/slam/right_track": 5.0,
     "/fsae/planning/selected_trajectory": 10.0,
+    "/fsae/planning/target_speed_profile": 10.0,
     "/fsae/perception/cone_detection": 15.0,
     "/fsae/perception/image": 5.0,
     "/fsae/hardware/can_tx": 100.0,
@@ -63,6 +67,11 @@ _RATE_HZ: dict[str, float] = {
     "/fsae/mission/mission_status": 1.0,
     "/fsae/mission/as_status": 1.0,
 }
+
+
+# Point count for the mock's planned-path preview -- selected_trajectory and
+# target_speed_profile must stay index-aligned, same as the real stack's.
+_TRAJ_N = 20
 
 
 def _stamp(t: float) -> dict:
@@ -231,16 +240,41 @@ class MockTransport(Transport):
             return {"steering_angle": steer, "steering_angle_velocity": 0.0,
                     "speed": speed, "acceleration": 0.0, "jerk": 0.0}
         if topic == "/fsae/slam/car_position":
-            # yaw is repurposed into orientation.w by the real camera node
-            return _pose_yaw_in_w(cx, cy, yaw)
+            # PoseStamped: yaw is repurposed into pose.orientation.w by the real
+            # sim_perception node, and header.stamp carries the measurement time.
+            return {
+                "header": {"stamp": _stamp(now), "frame_id": "map"},
+                "pose": _pose_yaw_in_w(cx, cy, yaw),
+            }
+        if topic == "/fsae/slam/car_odom":
+            # Same snapshot as car_position, plus twist -- see sim_perception.py's
+            # car_odom (real stack's actual/actual-speed source for the dashboard).
+            return {
+                "header": {"stamp": _stamp(now), "frame_id": "map"},
+                "pose": {"pose": _pose(cx, cy, yaw)},
+                "twist": {"twist": {
+                    "linear": {"x": act_speed, "y": 0.0, "z": 0.0},
+                    "angular": {"x": 0.0, "y": 0.0, "z": act_steer * act_speed / 2.5},
+                }},
+            }
         if topic == "/fsae/slam/car_velocity":
             return _point(speed * math.cos(yaw), speed * math.sin(yaw), 0.0)
         if topic == "/fsae/planning/selected_trajectory":
             poses = []
-            for i in range(20):
+            for i in range(_TRAJ_N):
                 a = theta + 0.02 * i
                 poses.append(_pose(radius * math.cos(a), radius * math.sin(a), a + math.pi / 2))
             return {"header": {"stamp": _stamp(now), "frame_id": "map"}, "poses": poses}
+        if topic == "/fsae/planning/target_speed_profile":
+            # Illustrative only -- NOT a port of fsae_control.control_utils's
+            # curvature_speed_profile() (that logic has one home, in fsae_planning;
+            # duplicating it here would risk silently drifting out of sync with
+            # it). This mock track is a constant-radius circle, which in reality
+            # curvature_speed_profile() would score as one near-uniform target
+            # speed; a gentle synthetic wave is used instead purely so the demo
+            # shows the trackview speed gradient doing something.
+            data = [9.0 + 4.0 * math.sin(theta + 0.15 * i) for i in range(_TRAJ_N)]
+            return {"layout": {"dim": [], "data_offset": 0}, "data": data}
         if topic in ("/fsae/slam/left_track", "/fsae/slam/right_track"):
             offset = 2.0 if topic == "/fsae/slam/left_track" else -2.0
             cones = []
