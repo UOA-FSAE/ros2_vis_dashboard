@@ -42,6 +42,8 @@ _DEFAULTS = {
     "detections_topic": "/fsae/perception/cone_detection",
 }
 _TYPES = {
+    # Current live stack publishes PoseStamped. Topic discovery will correct
+    # this automatically when connected to an older plain-Pose stack.
     "car_topic": "geometry_msgs/PoseStamped",
     "car_odom_topic": "nav_msgs/Odometry",
     "trajectory_topic": "geometry_msgs/PoseArray",
@@ -155,28 +157,22 @@ def _cloud_xy(msg: dict) -> np.ndarray:
 
 
 def _car_yaw(q: dict) -> float:
-    """Heading in radians, tolerant of this stack's non-standard convention.
+    """Return heading from this stack's non-standard car-pose convention.
 
     Several UOA-FSAE nodes stuff the yaw angle straight into ``orientation.w``
-    rather than a real quaternion (see stanley_controller.py: ``car_yaw =
-    car_pose.orientation.w``). A genuine unit quaternion has x²+y²+z²+w²==1; if
-    it doesn't, we treat ``w`` as the yaw angle directly.
+    rather than publishing a quaternion (see stanley_controller.py: ``car_yaw =
+    car_pose.orientation.w``). Do not try to infer the representation from the
+    quaternion norm: a yaw value near +/-1 happens to look like a unit quaternion
+    and used to make the displayed cones snap briefly to zero heading.
     """
-    x, y = q.get("x", 0.0), q.get("y", 0.0)
-    z, w = q.get("z", 0.0), q.get("w", 1.0)
-    norm = x * x + y * y + z * z + w * w
-    if abs(norm - 1.0) > 1e-3:
-        return w  # yaw stored directly in w
-    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return float(q.get("w", 0.0))
 
 
 def _car_pose_fields(car: dict | None) -> tuple[dict, dict] | None:
     """Return (position, orientation) dicts from car_topic, whatever its shape.
 
-    /fsae/slam/car_position moved from geometry_msgs/Pose to PoseStamped upstream
-    (to carry a measurement timestamp for the NMPC's delay compensation), which
-    nests position/orientation one level down under "pose". Support both shapes
-    so a stack still on the old plain-Pose message keeps working too.
+    Current deployments publish PoseStamped, while older stacks and recordings
+    may contain a plain Pose. Supporting both shapes keeps replay compatibility.
     """
     if not isinstance(car, dict):
         return None
@@ -755,10 +751,14 @@ class TrackViewPanel(Panel):
             if len(left):
                 self.left_curve.setData(left[:, 0], left[:, 1])
                 self._register_hover(left, "Left boundary cone")
+            else:
+                self.left_curve.setData([], [])
             right = _points_from((hub.latest(self._topics["right_topic"]) or {}).get("cones"))
             if len(right):
                 self.right_curve.setData(right[:, 0], right[:, 1])
                 self._register_hover(right, "Right boundary cone")
+            else:
+                self.right_curve.setData([], [])
 
         traj = _points_from((hub.latest(self._topics["trajectory_topic"]) or {}).get("poses"))
         if len(traj):
@@ -791,14 +791,25 @@ class TrackViewPanel(Panel):
             if self.laptime_cb.isChecked():
                 self._laps.update(cx, cy, time.time())
 
-        # car-pose transform shared by camera detections and the fusion cloud
+        # Latest car pose is still used for the ego marker, follow mode, and the
+        # unsynchronised debug cloud. ConeDetection has its own capture-matched
+        # car_pose and must use that instead (selected below).
         yaw = _car_yaw(pose_fields[1]) if pose_fields else 0.0
         yaw += self._yaw_offset
         ox, oy = car_xy if car_xy else (0.0, 0.0)
 
         det = hub.latest(self._topics["detections_topic"])
         if det:
-            self._draw_detections(det, ox, oy, yaw)
+            det_pose_fields = _car_pose_fields(det.get("car_pose"))
+            if det_pose_fields:
+                det_position, det_orientation = det_pose_fields
+                det_ox = float(det_position.get("x", 0.0))
+                det_oy = float(det_position.get("y", 0.0))
+                det_yaw = _car_yaw(det_orientation) + self._yaw_offset
+                self._draw_detections(det, det_ox, det_oy, det_yaw)
+            else:
+                # Compatibility fallback for non-standard third-party messages.
+                self._draw_detections(det, ox, oy, yaw)
 
         if self.fusion_cb.isChecked():
             self._draw_fusion_cloud(ox, oy, yaw)

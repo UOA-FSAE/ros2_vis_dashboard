@@ -6,6 +6,10 @@ dashboard of live plots and visualisation panels. You compose your own windows
 (a plot here, the track view there, CAN console at the bottom), then save the
 whole layout as a YAML config file and reopen it later.
 
+![FSAE Telemetry Dashboard running against the built-in simulator: 2D track view with lap timing, a live speed/steering plot, a stat tile and the topic browser](docs/images/dashboard.png)
+
+<sub>Live run against the built-in simulator — no car and no local ROS install needed.</sub>
+
 Connects to the car over a **rosbridge / foxglove WebSocket bridge**, optionally
 through an **SSH tunnel** — so it runs on Ubuntu, Windows and macOS with **no
 local ROS install required**. A built-in **simulator** lets you run the entire UI

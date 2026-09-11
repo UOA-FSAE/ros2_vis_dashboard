@@ -240,8 +240,6 @@ class MockTransport(Transport):
             return {"steering_angle": steer, "steering_angle_velocity": 0.0,
                     "speed": speed, "acceleration": 0.0, "jerk": 0.0}
         if topic == "/fsae/slam/car_position":
-            # PoseStamped: yaw is repurposed into pose.orientation.w by the real
-            # sim_perception node, and header.stamp carries the measurement time.
             return {
                 "header": {"stamp": _stamp(now), "frame_id": "map"},
                 "pose": _pose_yaw_in_w(cx, cy, yaw),
@@ -293,7 +291,9 @@ class MockTransport(Transport):
                 yellow.append(_point(d, -2.0 + 0.1 * math.cos(t + i)))
             return {
                 "header": {"stamp": _stamp(now), "frame_id": "camera_link"},
-                "car_pose": _pose(cx, cy, yaw),
+                # Capture-matched pose using the same yaw-in-w convention as
+                # the real ConeDetection publisher.
+                "car_pose": _pose_yaw_in_w(cx, cy, yaw),
                 "yellow": yellow,
                 "blue": blue,
                 "small_orange": [],

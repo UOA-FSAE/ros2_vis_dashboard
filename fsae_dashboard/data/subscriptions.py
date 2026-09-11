@@ -91,9 +91,21 @@ class SubscriptionManager(QObject):
                     if self._transport is not transport:
                         return  # transport changed; discard stale result
                     self._cached_topics = topics
+                    retype: list[str] = []
                     for ti in topics:
                         if ti.type:
+                            old_type = self._types.get(ti.name, "")
                             self._types[ti.name] = ti.type
+                            if (ti.name in self._handles and old_type
+                                    and old_type != ti.type):
+                                retype.append(ti.name)
+                    # Static panel defaults let subscriptions start before the
+                    # asynchronous topic list arrives. If discovery reveals a
+                    # different live type (notably Pose vs PoseStamped), replace
+                    # that handle so data starts flowing with the real contract.
+                    for topic in retype:
+                        self._teardown(topic)
+                        self._establish(topic)
                 self.topics_changed.emit(topics)
             finally:
                 with self._lock:
