@@ -31,6 +31,7 @@ _TOPICS: dict[str, str] = {
     "/fsae/slam/right_track": "fsae_interfaces/Track",
     "/fsae/planning/selected_trajectory": "geometry_msgs/PoseArray",
     "/fsae/planning/target_speed_profile": "std_msgs/Float64MultiArray",
+    "/fsae/planning/debug/triangulation": "visualization_msgs/MarkerArray",
     "/fsae/perception/cone_detection": "fsae_interfaces/ConeDetection",
     "/fsae/perception/image": "sensor_msgs/Image",
     "/fsae/hardware/can_tx": "fsae_interfaces/CANStamped",
@@ -55,6 +56,7 @@ _RATE_HZ: dict[str, float] = {
     "/fsae/slam/right_track": 5.0,
     "/fsae/planning/selected_trajectory": 10.0,
     "/fsae/planning/target_speed_profile": 10.0,
+    "/fsae/planning/debug/triangulation": 10.0,
     "/fsae/perception/cone_detection": 15.0,
     "/fsae/perception/image": 5.0,
     "/fsae/hardware/can_tx": 100.0,
@@ -101,6 +103,62 @@ def _pose_yaw_in_w(x: float, y: float, yaw: float) -> dict:
         "position": _point(x, y),
         "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": yaw},
     }
+
+
+# Colours of the planner's triangulation edge tags (wall_centerline_planner's
+# _TRI_EDGE_STYLE), so the mock MarkerArray looks like the real one.
+_TRI_MOCK_STYLE = {
+    "wall": ((0.0, 1.0, 0.0, 0.9), 0.06),
+    "mid": ((1.0, 0.0, 1.0, 0.9), 0.06),
+    "long": ((1.0, 0.6, 0.0, 0.5), 0.03),
+    "cross": ((0.8, 0.8, 0.8, 0.35), 0.02),
+}
+
+
+def _mock_triangulation(now: float, cx: float, cy: float, yaw: float,
+                        r_blue: float, r_yellow: float, n: int) -> dict:
+    """Synthetic /fsae/planning/debug/triangulation MarkerArray.
+
+    Two concentric cone rings triangulate as a strip: consecutive same-colour
+    edges are 'wall', the two cross-colour edges per quad are 'mid'. A few
+    inner-ring chords stand in for 'long' and every 9th gate is marked 'cross'
+    so every tag shows. Points go out in base_link (car at origin, +x ahead),
+    exactly like the planner's world_to_base_link, so the dashboard's inverse
+    transform is exercised too.
+    """
+    c, s = math.cos(yaw), math.sin(yaw)
+
+    def local(r: float, a: float) -> dict:
+        dx, dy = r * math.cos(a) - cx, r * math.sin(a) - cy
+        return _point(dx * c + dy * s, -dx * s + dy * c)
+
+    step = 2 * math.pi / n
+    edges: dict[str, list] = {tag: [] for tag in _TRI_MOCK_STYLE}
+    for i in range(n):
+        a0, a1 = step * i, step * (i + 1)
+        edges["wall"] += [local(r_blue, a0), local(r_blue, a1)]
+        edges["wall"] += [local(r_yellow, a0), local(r_yellow, a1)]
+        gate = "cross" if i % 9 == 0 else "mid"
+        edges[gate] += [local(r_blue, a0), local(r_yellow, a0)]
+        edges["mid"] += [local(r_blue, a1), local(r_yellow, a0)]
+        if i % 10 == 0:
+            edges["long"] += [local(r_yellow, a0), local(r_yellow, a0 + 6 * step)]
+    markers = []
+    for marker_id, (tag, (rgba, width)) in enumerate(_TRI_MOCK_STYLE.items()):
+        markers.append({
+            "header": {"stamp": _stamp(now), "frame_id": "base_link"},
+            "ns": f"triangulation_{tag}",
+            "id": marker_id,
+            "type": 5,    # LINE_LIST
+            "action": 0,  # ADD
+            "pose": {"position": _point(0.0, 0.0),
+                     "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}},
+            "scale": {"x": width, "y": 0.0, "z": 0.0},
+            "color": dict(zip("rgba", rgba)),
+            "lifetime": {"sec": 1, "nanosec": 500_000_000},
+            "points": edges[tag],
+        })
+    return {"markers": markers}
 
 
 def _synthetic_image(t: float, w: int = 160, h: int = 120) -> dict:
@@ -273,6 +331,9 @@ class MockTransport(Transport):
             # shows the trackview speed gradient doing something.
             data = [9.0 + 4.0 * math.sin(theta + 0.15 * i) for i in range(_TRAJ_N)]
             return {"layout": {"dim": [], "data_offset": 0}, "data": data}
+        if topic == "/fsae/planning/debug/triangulation":
+            # same cone rings as left_track (blue) / right_track (yellow) below
+            return _mock_triangulation(now, cx, cy, yaw, radius + 2.0, radius - 2.0, 40)
         if topic in ("/fsae/slam/left_track", "/fsae/slam/right_track"):
             offset = 2.0 if topic == "/fsae/slam/left_track" else -2.0
             cones = []

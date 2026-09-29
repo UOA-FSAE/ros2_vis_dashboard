@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -80,6 +81,34 @@ _FUSION_CLOUD_SOURCES = [
 _FUSION_CLOUD_TYPE = "sensor_msgs/PointCloud2"
 _FUSION_CLOUD_THROTTLE_MS = 200  # clouds are chunky; cap the wire rate
 _FUSION_HOVER_MAX = 300  # cap points registered for hover, to keep it snappy
+
+# fsae_planning's wall_centerline_planner publishes every edge of its
+# wall-build Delaunay triangulation (only with debug_viz:=true) as a
+# MarkerArray: one LINE_LIST per tag, ns "triangulation_<tag>", in base_link.
+# Tag meanings come from boundary.debug_triangulation_edges; colours mirror the
+# planner's _TRI_EDGE_STYLE so the view matches RViz.
+#   tag -> (checkbox label, RGBA, pen width px)
+_TRIANGULATION_TOPIC = "/fsae/planning/debug/triangulation"
+_TRIANGULATION_TYPE = "visualization_msgs/MarkerArray"
+_TRIANGULATION_THROTTLE_MS = 100
+_TRI_NS_PREFIX = "triangulation_"
+_TRI_TAGS = {
+    "wall": ("Wall (same colour, kept)", (0, 255, 0, 230), 2),
+    "mid": ("Mid (gate passed)", (255, 0, 255, 230), 2),
+    "long": ("Long (same colour, > max_dist)", (255, 153, 0, 130), 1),
+    "cross": ("Cross (gate length failed)", (204, 204, 204, 90), 1),
+}
+_TRI_TAG_TIPS = {
+    "wall": "Same-colour edge kept as a wall segment.",
+    "mid": "Cross-colour edge of a mixed triangle whose gates are within\n"
+           "[mid_min_gate, mid_max_gate] — usable corridor.",
+    "long": "Same-colour edge dropped for exceeding max_dist.\n"
+            "An expected wall showing up here means max_dist trimmed it.",
+    "cross": "Cross-colour edge whose every mixed triangle failed the gate\n"
+             "length check (missing intermediate cone or a stray/mislabelled one).",
+}
+# Marker frames that are already world-fixed; anything else is car-relative.
+_WORLD_FRAMES = ("map", "odom", "world")
 
 # PointCloud2 field datatype -> (numpy dtype char, byte size).
 _PC2_DT = {1: ("i1", 1), 2: ("u1", 1), 3: ("i2", 2), 4: ("u2", 2),
@@ -154,6 +183,25 @@ def _cloud_xy(msg: dict) -> np.ndarray:
     if x is None or y is None:
         return np.empty((0, 2))
     return np.column_stack([x, y])
+
+
+def _triangulation_edges(msg: dict) -> dict[str, np.ndarray]:
+    """Split the planner's triangulation MarkerArray into tag -> (N, 2, 2) edges.
+
+    Each LINE_LIST marker carries consecutive point pairs; the tag is the
+    marker ns minus the "triangulation_" prefix. Other namespaces are ignored.
+    """
+    out: dict[str, np.ndarray] = {}
+    for marker in msg.get("markers") or []:
+        if not isinstance(marker, dict):
+            continue
+        ns = marker.get("ns", "")
+        if not ns.startswith(_TRI_NS_PREFIX):
+            continue
+        pts = _points_from(marker.get("points"))
+        n = len(pts) // 2 * 2
+        out[ns[len(_TRI_NS_PREFIX):]] = pts[:n].reshape(-1, 2, 2)
+    return out
 
 
 def _car_yaw(q: dict) -> float:
@@ -496,6 +544,39 @@ class TrackViewPanel(Panel):
         self.fusion_topic_combo.blockSignals(False)
         self.fusion_topic_combo.currentTextChanged.connect(self._on_fusion_topic_changed)
 
+        # Optional planner Delaunay-triangulation overlay, subscribed only while
+        # enabled. Each message is paired with the car pose current when it
+        # ARRIVES (hub listener, transport thread) rather than the pose at
+        # render time: the planner publishes it straight from its pose callback,
+        # so the arrival-time pose is the closest match to the one it used for
+        # the base_link transform.
+        self._tri_topic = _TRIANGULATION_TOPIC
+        self._tri_frame: tuple[dict, dict | None, float] | None = None  # msg, car pose, t
+        self._tri_cache: tuple[object, dict[str, np.ndarray] | None] | None = None
+        self._tri_listening = False
+        self.tri_cb = QCheckBox("Planner triangulation")
+        self.tri_cb.setToolTip(
+            "Overlay every edge of the planner's wall-build Delaunay triangulation\n"
+            f"({_TRIANGULATION_TOPIC}, visualization_msgs/MarkerArray), tagged by why\n"
+            "each edge was kept or dropped. The planner only publishes this with\n"
+            "debug_viz:=true. Hover an edge to see its length."
+        )
+        self.tri_cb.toggled.connect(self._on_tri_toggled)
+        self.tri_topic_edit = QLineEdit(self._tri_topic)
+        self.tri_topic_edit.setToolTip("MarkerArray topic the planner publishes the triangulation on.")
+        self.tri_topic_edit.editingFinished.connect(self._on_tri_topic_changed)
+        self.tri_tag_cbs: dict[str, QCheckBox] = {}
+        for tag, (label, rgba, _w) in _TRI_TAGS.items():
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setToolTip(_TRI_TAG_TIPS[tag])
+            cb.setStyleSheet(f"QCheckBox{{color:rgb({rgba[0]},{rgba[1]},{rgba[2]});}}")
+            cb.toggled.connect(lambda on, t=tag: self._tri_curves[t].setVisible(on))
+            self.tri_tag_cbs[tag] = cb
+        self.tri_status = QLabel()
+        self.tri_status.setStyleSheet("color:#aaa;")
+        self.tri_status.setWordWrap(True)
+
         self.plot = pg.PlotWidget()
         self.plot.setBackground("#141414")
         self.plot.setAspectLocked(True)
@@ -520,6 +601,18 @@ class TrackViewPanel(Panel):
         self.trail_scatter = pg.ScatterPlotItem(size=5, pen=None)
         self.traj_speed_scatter = pg.ScatterPlotItem(size=7, pen=None)
         self.traj_speed_scatter.setZValue(-1)  # keep traj_curve's dashed outline on top
+
+        # Triangulation edges, one NaN-separated line item per tag, drawn below
+        # everything else so the planned path and cones stay readable on top --
+        # except the cone-wall boundaries, which sit under them: the planner's
+        # wall edges join the same cones, so they'd otherwise be hidden exactly.
+        self.left_curve.setZValue(-6)
+        self.right_curve.setZValue(-6)
+        self._tri_curves: dict[str, pg.PlotDataItem] = {}
+        for z, (tag, (_label, rgba, width)) in enumerate(reversed(list(_TRI_TAGS.items()))):
+            curve = self.plot.plot(pen=pg.mkPen(rgba, width=width), connect="finite")
+            curve.setZValue(-5 + 0.1 * z)  # wall/mid above the dim long/cross edges
+            self._tri_curves[tag] = curve
 
         # fusion cloud drawn under the cones so cone markers stay legible on top
         self.fusion_scatter = pg.ScatterPlotItem(
@@ -570,6 +663,9 @@ class TrackViewPanel(Panel):
             "lap_pos": list(self._lap_pos) if self._lap_pos else None,
             "fusion_cloud": self.fusion_cb.isChecked(),
             "fusion_cloud_topic": self._fusion_topic,
+            "triangulation": self.tri_cb.isChecked(),
+            "triangulation_topic": self._tri_topic,
+            "triangulation_tags": [t for t, cb in self.tri_tag_cbs.items() if cb.isChecked()],
         }
 
     def apply_config(self, config: dict) -> None:
@@ -600,6 +696,18 @@ class TrackViewPanel(Panel):
         self.fusion_topic_combo.setCurrentText(self._fusion_topic)
         self.fusion_topic_combo.blockSignals(False)
         self.fusion_cb.setChecked(bool(config.get("fusion_cloud", False)))
+        # triangulation: same topic-before-checkbox ordering as the fusion cloud
+        self._tri_topic = config.get("triangulation_topic", self._tri_topic)
+        self.tri_topic_edit.setText(self._tri_topic)
+        tags = config.get("triangulation_tags")
+        if isinstance(tags, list):
+            for tag, cb in self.tri_tag_cbs.items():
+                cb.setChecked(tag in tags)
+        self.tri_cb.setChecked(bool(config.get("triangulation", False)))
+
+    def dispose(self) -> None:
+        self._set_tri_listening(False)
+        super().dispose()
 
     def clear(self) -> None:
         self._trail = []
@@ -611,6 +719,7 @@ class TrackViewPanel(Panel):
                         self.fusion_scatter, self.blue_scatter, self.yellow_scatter,
                         self.small_orange_scatter, self.orange_scatter, self.car_scatter):
             scatter.clear()
+        self._clear_triangulation()
         self._hover_points = []
         self._hover_pending = None
         self._hover_shown = False
@@ -634,7 +743,15 @@ class TrackViewPanel(Panel):
             form.addRow("Cone data source", self.cone_source_combo)
             form.addRow(self.fusion_cb)
             form.addRow("Fusion cloud topic", self.fusion_topic_combo)
+            form.addRow(self.tri_cb)
+            form.addRow("Triangulation topic", self.tri_topic_edit)
+            tags = QHBoxLayout()
+            for cb in self.tri_tag_cbs.values():
+                tags.addWidget(cb)
+            form.addRow("Edges", tags)
+            form.addRow(self.tri_status)
             self._options_dialog = dlg
+            self._update_tri_status()
         self.ctx.subs.list_topics()  # refresh discovered cone topics on open
         self._options_dialog.show()
         self._options_dialog.raise_()
@@ -685,6 +802,52 @@ class TrackViewPanel(Panel):
         self._fusion_topic = topic
         if self.fusion_cb.isChecked() and topic:
             self.subscribe(topic, _FUSION_CLOUD_TYPE, _FUSION_CLOUD_THROTTLE_MS)
+
+    def _on_tri_toggled(self, on: bool) -> None:
+        """Subscribe to the planner triangulation only while the overlay is enabled."""
+        self._set_tri_listening(on)
+        if on and self._tri_topic:
+            self.subscribe(self._tri_topic, _TRIANGULATION_TYPE, _TRIANGULATION_THROTTLE_MS)
+        elif not on:
+            if self._tri_topic:
+                self.release(self._tri_topic)
+            self._clear_triangulation()
+        self._update_tri_status()
+
+    def _on_tri_topic_changed(self) -> None:
+        topic = self.tri_topic_edit.text().strip()
+        old = self._tri_topic
+        if topic == old:
+            return
+        if self.tri_cb.isChecked() and old:
+            self.release(old)
+        self._tri_topic = topic
+        self._clear_triangulation()
+        if self.tri_cb.isChecked() and topic:
+            self.subscribe(topic, _TRIANGULATION_TYPE, _TRIANGULATION_THROTTLE_MS)
+        self._update_tri_status()
+
+    def _set_tri_listening(self, on: bool) -> None:
+        if on and not self._tri_listening:
+            self.ctx.hub.add_listener(self._on_hub_msg)
+        elif not on and self._tri_listening:
+            self.ctx.hub.remove_listener(self._on_hub_msg)
+        self._tri_listening = on
+
+    def _on_hub_msg(self, topic: str, msg: dict, t: float) -> None:
+        """Hub tap (transport thread): pair each triangulation with the car pose.
+
+        Must stay cheap — it runs for every ingested message. A single tuple
+        assignment is atomic, so the UI thread never sees a half-updated frame.
+        """
+        if topic == self._tri_topic:
+            self._tri_frame = (msg, self.ctx.hub.latest(self._topics["car_topic"]), t)
+
+    def _clear_triangulation(self) -> None:
+        self._tri_frame = None
+        self._tri_cache = None
+        for curve in self._tri_curves.values():
+            curve.setData([], [])
 
     # --- toolbar / lap actions ---------------------------------------------
     def _on_walls_toggled(self, on: bool) -> None:
@@ -814,6 +977,11 @@ class TrackViewPanel(Panel):
         if self.fusion_cb.isChecked():
             self._draw_fusion_cloud(ox, oy, yaw)
 
+        if self.tri_cb.isChecked():
+            self._draw_triangulation()
+            if self._options_dialog is not None and self._options_dialog.isVisible():
+                self._update_tri_status()
+
         if self.follow_cb.isChecked() and car_xy:
             self.plot.setXRange(car_xy[0] - 15, car_xy[0] + 15, padding=0)
             self.plot.setYRange(car_xy[1] - 15, car_xy[1] + 15, padding=0)
@@ -928,6 +1096,93 @@ class TrackViewPanel(Panel):
             self._hover_points.append(
                 (fx, fy, f"LiDAR fusion point — ({fx:.2f}, {fy:.2f}) m")
             )
+
+    def _draw_triangulation(self) -> None:
+        """Render the planner's tagged Delaunay edges in the map frame.
+
+        The planner publishes in base_link via world_to_base_link (rotate by
+        -yaw about the car); we invert that with the car pose paired at arrival
+        (see _on_hub_msg). The raw yaw is used, NOT the heading-offset option:
+        the planner transformed with the raw pose, so that is the exact inverse.
+        Geometry is only rebuilt when a new message arrives; hover points are
+        re-registered every tick like every other layer.
+        """
+        frame = self._tri_frame
+        if frame is None:
+            return
+        if self._tri_cache is None or self._tri_cache[0] is not frame:
+            self._tri_cache = (frame, self._triangulation_to_map(frame))
+            edges = self._tri_cache[1] or {}
+            for tag, curve in self._tri_curves.items():
+                e = edges.get(tag)
+                if e is None or not len(e):
+                    curve.setData([], [])
+                    continue
+                gap = np.full(len(e), np.nan)
+                xs = np.column_stack([e[:, 0, 0], e[:, 1, 0], gap]).ravel()
+                ys = np.column_stack([e[:, 0, 1], e[:, 1, 1], gap]).ravel()
+                curve.setData(xs, ys, connect="finite")
+        for tag, e in (self._tri_cache[1] or {}).items():
+            if tag not in self.tri_tag_cbs or not self.tri_tag_cbs[tag].isChecked():
+                continue
+            mids = e.mean(axis=1)
+            lens = np.linalg.norm(e[:, 1] - e[:, 0], axis=1)
+            label = _TRI_TAGS[tag][0]
+            for i in range(len(e)):
+                mx, my = float(mids[i, 0]), float(mids[i, 1])
+                self._hover_points.append(
+                    (mx, my, f"Triangulation {label} edge #{i} — length {lens[i]:.2f} m "
+                             f"· ({e[i, 0, 0]:.2f}, {e[i, 0, 1]:.2f}) → "
+                             f"({e[i, 1, 0]:.2f}, {e[i, 1, 1]:.2f}) m")
+                )
+
+    def _triangulation_to_map(self, frame) -> dict[str, np.ndarray] | None:
+        """tag -> (N, 2, 2) map-frame edges, or None if the car pose is missing."""
+        msg, car, _t = frame
+        edges = _triangulation_edges(msg)
+        frame_id = ""
+        for marker in msg.get("markers") or []:
+            if isinstance(marker, dict):
+                frame_id = (marker.get("header") or {}).get("frame_id", "")
+                break
+        if frame_id in _WORLD_FRAMES:
+            return edges
+        pose_fields = _car_pose_fields(car)
+        if not pose_fields:
+            return None
+        position, orientation = pose_fields
+        ox, oy = float(position.get("x", 0.0)), float(position.get("y", 0.0))
+        yaw = _car_yaw(orientation)
+        c, s = math.cos(yaw), math.sin(yaw)
+        out = {}
+        for tag, e in edges.items():
+            x, y = e[..., 0], e[..., 1]
+            out[tag] = np.stack([ox + x * c - y * s, oy + x * s + y * c], axis=-1)
+        return out
+
+    def _update_tri_status(self) -> None:
+        """One-line health readout for the triangulation overlay (Options popup)."""
+        if not self.tri_cb.isChecked():
+            self.tri_status.setText("")
+            return
+        frame = self._tri_frame
+        if frame is None:
+            self.tri_status.setText(
+                f"No messages on {self._tri_topic or '(no topic)'} yet — the planner "
+                "only publishes it with debug_viz:=true."
+            )
+            return
+        age = time.time() - frame[2]
+        cache = self._tri_cache
+        if cache is not None and cache[0] is frame and cache[1] is None:
+            self.tri_status.setText(
+                f"Triangulation is car-relative but no car pose was seen on "
+                f"{self._topics['car_topic']} — can't place it."
+            )
+            return
+        edges = _triangulation_edges(frame[0])
+        counts = " · ".join(f"{tag} {len(edges.get(tag, ()))}" for tag in _TRI_TAGS)
+        self.tri_status.setText(f"Edges: {counts}  (last msg {age:.1f} s ago)")
 
     # --- hover-to-identify --------------------------------------------------
     def _register_hover(self, pts: np.ndarray, label: str) -> None:

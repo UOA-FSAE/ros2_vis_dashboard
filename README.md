@@ -201,7 +201,7 @@ and verify the bridge is serving this dashboard correctly:
 | Panel | What it shows |
 |-------|---------------|
 | **Time Series Plot** | Any numeric field(s) from any topic vs. time. `+ Field` to pick a topic + field. |
-| **Track View (2D)** | Cones, left/right boundaries, planned trajectory, car pose + trail. The RViz replacement. |
+| **Track View (2D)** | Cones, left/right boundaries, planned trajectory, car pose + trail. The RViz replacement. Options → *Planner triangulation* overlays the planner's Delaunay edges from `/fsae/planning/debug/triangulation` (wall / mid / long / cross; needs the planner's `debug_viz:=true`). |
 | **Camera** | `sensor_msgs/Image` or `CompressedImage`, with fps. |
 | **Stat Tiles** | Big at-a-glance values (AS state, battery voltage, …). |
 | **Raw Message Inspector** | Pretty-printed latest message of any topic — the `topic echo` replacement. |
